@@ -1,0 +1,5 @@
+build/
+build-mingw/
+scripts/__pycache__/
+figures/*.aux
+figures/*.log

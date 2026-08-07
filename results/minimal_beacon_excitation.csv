@@ -1,0 +1,4 @@
+case,beacons,poses,observability_rank,smallest_singular_value,target_error,trajectory_spread,beacon_position_error,beacon_yaw_error,cost,iterations,solver_converged
+single_pose_no_excitation,1,1,4,0.00000000,1.83744234,0.00000000,5.58346026,1.15951114,0.00000000,9,1
+two_distinct_poses,1,2,5,22.17661320,0.00000000,9.03726297,0.00000000,0.00000000,0.00000000,1,1
+full_excited_trajectory,1,80,5,219.12497041,0.00000000,314.21262500,0.00000000,0.00000000,0.00000000,1,1
