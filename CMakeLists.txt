@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(adaptive_localization_core STATIC
     src/Config.cpp
     src/Estimators.cpp
+    src/Matrix.cpp
     src/Measurements.cpp
     src/Output.cpp
     src/Simulation.cpp

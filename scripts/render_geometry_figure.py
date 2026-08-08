@@ -1,3 +1,26 @@
+"""Render the paper's beacon-observation-geometry schematic (Fig. 1 in the
+ACC/L-CSS manuscript), which illustrates the unknown beacon frame and the
+bearing/range measurement rays from two vehicle poses (q_a, q_b) and a
+target (p) to a common landmark (x, psi).
+
+Reads: no data files -- the figure geometry (point coordinates, arrow
+layout) is a fixed, hand-placed TikZ diagram embedded directly in this
+script as ``TIKZ_SOURCE``; it does not depend on any CSV produced by the
+C++ pipeline.
+
+Writes:
+    - figures/acc_geometry.tex (the standalone TikZ/LaTeX source, written
+      out so it can be inspected or recompiled independently)
+    - figures/acc_geometry.pdf (compiled via pdflatex, invoked as a
+      subprocess)
+
+The diagram shows how the vehicle-to-beacon offsets (R(psi) * l_a^v,
+R(psi) * l_b^v) and the vehicle-to-target offset (R(psi) * l^{t,*}) are all
+expressed in the same unknown, rotated beacon frame -- the geometric
+quantity that trajectory-induced self-calibration must recover from motion
+across multiple vehicle poses.
+"""
+
 from __future__ import annotations
 
 import subprocess
@@ -10,6 +33,12 @@ TEX = OUT_DIR / "acc_geometry.tex"
 PDF = OUT_DIR / "acc_geometry.pdf"
 
 
+# Standalone TikZ document for the geometry schematic. Kept as a raw string
+# (rather than assembled programmatically) so the .tex file written below is
+# byte-for-byte what a LaTeX-savvy reader could hand-edit; qa/qb are the two
+# vehicle poses, x is the unknown beacon position, p is the target, and psi
+# is the beacon's unknown heading -- all measurement rays are drawn rotated
+# by R(psi) to emphasize that they live in the beacon's own unknown frame.
 TIKZ_SOURCE = r"""\documentclass[tikz,border=2pt]{standalone}
 \usepackage{amsmath}
 \usetikzlibrary{arrows.meta,calc}
@@ -59,6 +88,16 @@ TIKZ_SOURCE = r"""\documentclass[tikz,border=2pt]{standalone}
 
 
 def main() -> None:
+    """Write the TikZ source to figures/acc_geometry.tex and compile it to
+    figures/acc_geometry.pdf via ``pdflatex``.
+
+    Creates the figures/ output directory if needed, writes TIKZ_SOURCE
+    verbatim to TEX, then runs pdflatex with the working directory set to
+    OUT_DIR (so pdflatex's auxiliary/log files land alongside the .tex file
+    rather than the current working directory) and ``check=True`` so a
+    LaTeX compilation failure raises instead of failing silently. Takes no
+    parameters and returns nothing; prints the resulting PDF path on success.
+    """
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     TEX.write_text(TIKZ_SOURCE, encoding="ascii")
     subprocess.run(

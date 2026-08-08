@@ -10,20 +10,57 @@
 #include <utility>
 
 #include "adaptive_localization/Estimators.hpp"
+#include "adaptive_localization/Matrix.hpp"
 #include "adaptive_localization/Measurements.hpp"
 #include "adaptive_localization/Solver.hpp"
 #include "adaptive_localization/World.hpp"
+
+/**
+ * @file Simulation.cpp
+ * @brief Implements every simulation entry point declared in Simulation.hpp:
+ * the continuous-time adaptive estimator (run_adaptive_localization), the
+ * animated closed-loop estimate/update/control demo
+ * (run_closed_loop_comparison) with its three excitation policies, the
+ * discrete-time batch trial harness spanning the uncalibrated local-frame
+ * self-calibration model (scenario 1), the calibrated global-frame baseline
+ * (scenario 2), and two EKF variants (scenarios 3/4), plus the local
+ * observability/Fisher-information ("gauge") diagnostics
+ * (normal_matrix_for_local_observability, jacobi_eigenvalues,
+ * local_observability_metrics) and the many Monte Carlo robustness sweeps
+ * (noise, geometry, trajectory shape, initialization, measurement
+ * dropout/outliers, vehicle-pose noise, and information conditioning) that
+ * populate the paper's result tables. Anonymous-namespace helpers below are
+ * implementation details private to this translation unit.
+ */
 
 namespace adaptive {
 
 namespace {
 
+/**
+ * @brief One noisy range/bearing observation of a single beacon under the
+ * rigorous global-frame "core" adaptive model used by
+ * run_adaptive_localization(): `rv` is the measured robot-to-beacon range,
+ * `rt` is the measured target-to-beacon range, and `u` is the (noisy) unit
+ * bearing vector from the beacon toward the target.
+ */
 struct CoreMeasurement {
     double rv = 0.0;
     double rt = 0.0;
     Vec2 u;
 };
 
+/**
+ * @brief Local-observability/Fisher-information summary for a single
+ * beacon's 5-dimensional state (target x,y + beacon x,y,yaw), computed by
+ * local_observability_metrics(). `rank` counts singular values of the
+ * whitened Jacobian above a relative threshold; `sigma_min` (the paper's
+ * S_v) is reported only when full rank 5 is achieved; `condition_number` is
+ * sigma_max/sigma_min (or a large sentinel when rank-deficient); `logdet`
+ * is the log-determinant of the Fisher information matrix (information
+ * score used to drive the excitation controller); `trajectory_spread` is
+ * the viewing-geometry scatter measure from trajectory_spread().
+ */
 struct ObservabilityMetrics {
     int rank = 0;
     double sigma_min = 0.0;
@@ -33,6 +70,15 @@ struct ObservabilityMetrics {
     double trajectory_spread = 0.0;
 };
 
+/**
+ * @brief Configuration for injecting synthetic measurement imperfections in
+ * generate_stressed_local_measurements(): `dropout_probability` randomly
+ * discards measurements (missed detections), `outlier_probability`
+ * corrupts a measurement's range/bearing by a fixed magnitude with random
+ * sign (gross sensor errors), and `use_fov`/`fov_half_angle` discard
+ * measurements whose local bearing falls outside a field-of-view half
+ * angle. All defaults are "no stress" (pass-through).
+ */
 struct MeasurementStress {
     double dropout_probability = 0.0;
     double outlier_probability = 0.0;
@@ -42,6 +88,8 @@ struct MeasurementStress {
     bool use_fov = false;
 };
 
+/** @brief Draws one zero-mean Gaussian noise sample with std-dev `sigma`,
+ *  or exactly 0.0 when `sigma <= 0` (treated as noiseless). */
 double sample_noise(double sigma, std::mt19937& rng) {
     if (sigma <= 0.0) {
         return 0.0;
@@ -50,6 +98,13 @@ double sample_noise(double sigma, std::mt19937& rng) {
     return distribution(rng);
 }
 
+/**
+ * @brief Generates one noisy CoreMeasurement per beacon for the
+ * continuous-time adaptive model: the target-bearing-from-beacon `u` is
+ * corrupted with bearing noise, and both the robot-to-beacon range `rv` and
+ * target-to-beacon range `rt` are corrupted with range noise (each clamped
+ * to a minimum of 0.05 to avoid degenerate zero/negative ranges).
+ */
 std::vector<CoreMeasurement> measure_core_model(
     const World& world,
     const Vec2& robot,
@@ -69,6 +124,15 @@ std::vector<CoreMeasurement> measure_core_model(
     return measurements;
 }
 
+/**
+ * @brief Evaluates the continuous adaptive model's cost
+ * sum_i 0.5 * epsilon_i^2, where
+ * epsilon_i = (r_i^v)^2 - ||robot - target_estimate + r_i^t u_i||^2
+ * is the per-beacon prediction-error ("innovation") signal from the paper's
+ * adaptive law. Used only for logging/diagnostics; the adaptive update
+ * itself (core_adaptive_update) does not follow this cost's gradient with
+ * respect to the robot.
+ */
 double core_cost(
     const Vec2& robot,
     const Vec2& target_estimate,
@@ -82,6 +146,13 @@ double core_cost(
     return cost;
 }
 
+/**
+ * @brief Computes phat_dot for the continuous adaptive law:
+ * phat_dot = -2 * gamma * sum_i epsilon_i * (robot - target_estimate + r_i^t u_i)
+ * where epsilon_i = (r_i^v)^2 - ||robot - target_estimate + r_i^t u_i||^2.
+ * Callers (run_adaptive_localization) integrate this forward with a fixed
+ * Euler step rather than solving a batch least-squares problem.
+ */
 Vec2 core_adaptive_update(
     const Vec2& robot,
     const Vec2& target_estimate,
@@ -96,6 +167,13 @@ Vec2 core_adaptive_update(
     return sum * (-2.0 * gamma);
 }
 
+/**
+ * @brief Derives a per-beacon position estimate from the current target
+ * estimate and each beacon's measured bearing-to-target/range-to-target:
+ * beacon_position = target_estimate - r_i^t * u_i. Used by the continuous
+ * adaptive model, which never estimates beacon yaw (yaw is always reported
+ * as 0.0 since this model has no notion of a beacon-local frame).
+ */
 std::vector<BeaconEstimate> core_beacon_estimates(
     const Vec2& target_estimate,
     const std::vector<CoreMeasurement>& measurements) {
@@ -107,6 +185,8 @@ std::vector<BeaconEstimate> core_beacon_estimates(
     return estimates;
 }
 
+/** @brief RMSE of estimated vs. true beacon positions (paired by index with
+ *  `world.beacons`); returns 0.0 for an empty estimate list. */
 double beacon_position_rmse(const World& world, const std::vector<BeaconEstimate>& estimates) {
     if (estimates.empty()) {
         return 0.0;
@@ -119,6 +199,9 @@ double beacon_position_rmse(const World& world, const std::vector<BeaconEstimate
     return std::sqrt(sum / static_cast<double>(estimates.size()));
 }
 
+/** @brief RMSE of estimated vs. true beacon yaw (wrapped to (-pi, pi] before
+ *  squaring); returns the sentinel -1.0 for an empty estimate list, matching
+ *  the "not applicable" convention used by scenario 2 (no yaw estimated). */
 double beacon_yaw_rmse(const World& world, const std::vector<BeaconEstimate>& estimates) {
     if (estimates.empty()) {
         return -1.0;
@@ -131,6 +214,14 @@ double beacon_yaw_rmse(const World& world, const std::vector<BeaconEstimate>& es
     return std::sqrt(sum / static_cast<double>(estimates.size()));
 }
 
+/**
+ * @brief Simple pass/fail accuracy gate for one trial: target error and
+ * beacon position error must both be under 5 cm, and beacon yaw error (if
+ * reported, i.e. not the -1.0 "not applicable" sentinel) must also be under
+ * 0.05 rad. Distinct from the solver's own `converged` flag (which reflects
+ * whether Gauss-Newton/EKF numerically settled, not whether the settled
+ * answer was accurate).
+ */
 bool trial_accuracy_success(
     double target_error,
     double beacon_position_error,
@@ -140,6 +231,14 @@ bool trial_accuracy_success(
         (beacon_yaw_error < 0.0 || beacon_yaw_error < 0.05);
 }
 
+/**
+ * @brief Packs the ground-truth World into the scenario-1 state layout
+ * [target.x, target.y, beacon0.x, beacon0.y, beacon0.yaw, ...], i.e. the
+ * value the estimator's state vector would take if it recovered the truth
+ * exactly. Used as the state at which noiseless observability diagnostics
+ * (local_observability_metrics, local_observability_rank_and_sigma_min) are
+ * evaluated.
+ */
 std::vector<double> true_state_scenario1(const World& world) {
     std::vector<double> state{world.target.x, world.target.y};
     for (std::size_t i = 0; i < world.beacons.size(); ++i) {
@@ -150,6 +249,22 @@ std::vector<double> true_state_scenario1(const World& world) {
     return state;
 }
 
+/**
+ * @brief Builds the 5x5 normal/Fisher-information matrix J^T J for a
+ * single beacon's state (target x,y + beacon x,y,yaw) from the whitened
+ * scenario-1 Jacobian (jacobian_scenario1, beacon_count fixed to 1). This
+ * is the core "gauge"/local-observability building block: its eigenvalues
+ * (via jacobi_eigenvalues) give the squared singular values of the
+ * Jacobian, which local_observability_metrics() turns into rank,
+ * sigma_min/sigma_max, condition number, and log-determinant.
+ *
+ * @param state        5-element state [target.x, target.y, beacon.x,
+ *        beacon.y, beacon.yaw] at which the Jacobian is linearized.
+ * @param path         Known vehicle path (only entries referenced by
+ *        `measurements` matter).
+ * @param measurements Local-frame measurements of the single beacon.
+ * @return Row-major flattened 5x5 symmetric normal matrix.
+ */
 std::array<double, 25> normal_matrix_for_local_observability(
     const std::vector<double>& state,
     const std::vector<Vec2>& path,
@@ -158,6 +273,8 @@ std::array<double, 25> normal_matrix_for_local_observability(
     const auto jacobian = jacobian_scenario1(state, 1, path, measurements);
     std::array<double, 25> normal{};
 
+    // Accumulate J^T J directly (only the upper triangle is computed, then
+    // mirrored, since the normal matrix is symmetric by construction).
     for (int row = 0; row < n; ++row) {
         for (int col = row; col < n; ++col) {
             double value = 0.0;
@@ -172,12 +289,30 @@ std::array<double, 25> normal_matrix_for_local_observability(
     return normal;
 }
 
+/**
+ * @brief Measures viewing-geometry diversity ("excitation") for each
+ * beacon: the sum of squared deviations of the local vehicle-bearing
+ * vectors (range/bearing-to-vehicle expressed in the beacon's own local
+ * frame) about their per-beacon mean, summed over all beacons. A large
+ * spread indicates the vehicle was observed from many different relative
+ * angles/ranges (good for self-calibration); a near-zero spread indicates
+ * a near-stationary or collinear/degenerate viewing history.
+ *
+ * @param measurements Local-frame measurements (possibly for multiple
+ *        beacons; each is binned into `measurement.beacon`).
+ * @param beacon_count Number of beacons to bin over; measurements
+ *        referencing an out-of-range beacon index are skipped.
+ * @return 0.0 if there are no measurements or beacons; otherwise the total
+ *         scatter (sum over beacons of the per-beacon squared-deviation
+ *         sum).
+ */
 double trajectory_spread(const std::vector<LocalFrameMeasurement>& measurements, int beacon_count) {
     if (measurements.empty() || beacon_count <= 0) {
         return 0.0;
     }
     std::vector<Vec2> sums(static_cast<std::size_t>(beacon_count));
     std::vector<int> counts(static_cast<std::size_t>(beacon_count), 0);
+    // First pass: accumulate the mean local vehicle-bearing vector per beacon.
     for (const auto& measurement : measurements) {
         if (measurement.beacon >= sums.size()) {
             continue;
@@ -194,6 +329,8 @@ double trajectory_spread(const std::vector<LocalFrameMeasurement>& measurements,
                 sums[static_cast<std::size_t>(i)] / static_cast<double>(counts[static_cast<std::size_t>(i)]);
         }
     }
+    // Second pass: sum squared deviations from each beacon's mean (a
+    // scatter/variance measure of viewing-geometry diversity over time).
     double spread = 0.0;
     for (const auto& measurement : measurements) {
         if (measurement.beacon >= means.size()) {
@@ -207,9 +344,26 @@ double trajectory_spread(const std::vector<LocalFrameMeasurement>& measurements,
     return spread;
 }
 
+/**
+ * @brief Computes the eigenvalues of a symmetric 5x5 matrix via the
+ * classic cyclic Jacobi eigenvalue algorithm: repeatedly finds the largest
+ * off-diagonal entry and zeroes it with a Givens/Jacobi rotation, for up to
+ * 80 sweeps or until all off-diagonal entries are negligible (< 1e-10).
+ * Eigenvalues are clamped to be non-negative (the normal matrix is PSD in
+ * exact arithmetic; small negative numerical noise is floored to 0) and
+ * returned sorted ascending. Used to diagonalize the normal matrix from
+ * normal_matrix_for_local_observability(); sqrt(eigenvalue) gives the
+ * corresponding singular value of the Jacobian.
+ *
+ * @param a Row-major flattened symmetric 5x5 matrix (passed by value since
+ *        the algorithm mutates it in place as it rotates).
+ * @return The 5 eigenvalues in ascending order.
+ */
 std::array<double, 5> jacobi_eigenvalues(std::array<double, 25> a) {
     constexpr int n = 5;
     for (int sweep = 0; sweep < 80; ++sweep) {
+        // Find the largest-magnitude off-diagonal entry (p, q); this is the
+        // pair the next Jacobi rotation will annihilate.
         int p = 0;
         int q = 1;
         double max_offdiag = 0.0;
@@ -224,9 +378,14 @@ std::array<double, 5> jacobi_eigenvalues(std::array<double, 25> a) {
             }
         }
         if (max_offdiag < 1e-10) {
+            // Off-diagonal entries are all negligible: the matrix is
+            // effectively diagonal already, so the diagonal holds the
+            // eigenvalues and we can stop early.
             break;
         }
 
+        // Rotation angle that zeroes a[p][q]/a[q][p] (standard 2x2 Jacobi
+        // rotation formula), then apply the rotation to rows/columns p, q.
         const double app = a[static_cast<std::size_t>(p * n + p)];
         const double aqq = a[static_cast<std::size_t>(q * n + q)];
         const double apq = a[static_cast<std::size_t>(p * n + q)];
@@ -254,6 +413,9 @@ std::array<double, 5> jacobi_eigenvalues(std::array<double, 25> a) {
         a[static_cast<std::size_t>(q * n + p)] = 0.0;
     }
 
+    // After convergence (or the sweep cap), the diagonal holds the
+    // eigenvalues; clamp tiny negative noise to zero and sort ascending so
+    // callers can read off sigma_min/sigma_max directly from the ends.
     std::array<double, 5> values{};
     for (int i = 0; i < n; ++i) {
         values[static_cast<std::size_t>(i)] =
@@ -263,6 +425,18 @@ std::array<double, 5> jacobi_eigenvalues(std::array<double, 25> a) {
     return values;
 }
 
+/**
+ * @brief Lightweight variant of local_observability_metrics() that returns
+ * only the two fields most sweeps need: the observability rank (count of
+ * singular values above a relative threshold `max(1e-6, sigma_max*1e-7)`)
+ * and, when full rank 5 is achieved, the smallest singular value
+ * (the paper's S_v). When rank < 5, sigma_min is reported as 0.0 rather
+ * than a meaningless near-zero value, since a gauge-degenerate direction
+ * exists (e.g. from a stationary or collinear trajectory) and no singular
+ * value meaningfully bounds the estimator's conditioning.
+ *
+ * @return {rank, sigma_min}; sigma_min is 0.0 whenever rank != 5.
+ */
 std::pair<int, double> local_observability_rank_and_sigma_min(
     const std::vector<double>& state,
     const std::vector<Vec2>& path,
@@ -274,6 +448,8 @@ std::pair<int, double> local_observability_rank_and_sigma_min(
         const double threshold = std::max(1e-6, largest * 1e-7);
         int rank = 0;
         double smallest_positive = 0.0;
+        // eigenvalues is sorted ascending, so the first singular value that
+        // clears the threshold is the smallest observed one.
         for (double eigenvalue : eigenvalues) {
             const double singular_value = std::sqrt(std::max(0.0, eigenvalue));
             if (singular_value > threshold) {
@@ -288,6 +464,17 @@ std::pair<int, double> local_observability_rank_and_sigma_min(
     return metrics;
 }
 
+/**
+ * @brief Full local-observability/Fisher-information diagnostic for a
+ * single beacon: diagonalizes the normal matrix (normal_matrix_for_local_
+ * observability + jacobi_eigenvalues) and derives rank, sigma_min (S_v,
+ * valid only at full rank 5), sigma_max, condition_number
+ * (sigma_max/sigma_min, or the sentinel 1e12 when rank-deficient), the
+ * information-theoretic logdet score (sum of log(eigenvalue), floored at
+ * 1e-18 to avoid log(0) — this is the objective the information-driven
+ * excitation controller greedily climbs), and trajectory_spread (viewing
+ * geometry diversity).
+ */
 ObservabilityMetrics local_observability_metrics(
     const std::vector<double>& state,
     const std::vector<Vec2>& path,
@@ -317,6 +504,14 @@ ObservabilityMetrics local_observability_metrics(
     return metrics;
 }
 
+/**
+ * @brief Predicts what a LocalFrameMeasurement of `beacon_estimate` would
+ * look like from `robot`, given the current `target_estimate`: forward
+ * range/bearing model evaluated at the estimated (not true) beacon pose.
+ * Used by predicted_local_logdet_score() to synthesize a hypothetical
+ * "next" measurement for a candidate robot position, without needing an
+ * actual sensor reading.
+ */
 LocalFrameMeasurement predicted_local_frame_measurement(
     const Vec2& robot,
     const Vec2& target_estimate,
@@ -335,6 +530,19 @@ LocalFrameMeasurement predicted_local_frame_measurement(
     return measurement;
 }
 
+/**
+ * @brief Evaluates what the local-observability logdet score would become
+ * if the robot took one additional hypothetical measurement from
+ * `candidate_robot` (single-beacon case only). Appends a predicted
+ * measurement (predicted_local_frame_measurement) to the existing history
+ * and re-runs local_observability_metrics() on the augmented path. This is
+ * the scalar objective information_driven_excitation() differentiates via
+ * finite differences to choose an excitation direction.
+ *
+ * @return -1e18 (an effectively -infinity sentinel) if the single-beacon
+ *         preconditions (5-element state, exactly one beacon estimate)
+ *         are not met.
+ */
 double predicted_local_logdet_score(
     const Vec2& candidate_robot,
     const Vec2& target_estimate,
@@ -360,6 +568,33 @@ double predicted_local_logdet_score(
     return local_observability_metrics(state, candidate_path, candidate_measurements).logdet;
 }
 
+/**
+ * @brief Computes the excitation velocity for
+ * ClosedLoopExcitationMode::Information: a central finite-difference
+ * gradient of predicted_local_logdet_score() with respect to the robot's
+ * (x, y) position, scaled by a decaying exploration envelope so early
+ * steps explore more aggressively and later steps settle down (mirroring
+ * the amplitude decay of the fixed circular-swirl schedule).
+ *
+ * @param robot            Current robot position (gradient is evaluated
+ *        around this point).
+ * @param target_estimate  Current target-position estimate.
+ * @param state            Current scenario-1 state (must be exactly 5
+ *        elements: single-beacon case).
+ * @param beacon_estimates Current beacon estimate(s) (must be exactly one).
+ * @param path             Measurement history's vehicle path so far.
+ * @param measurements     Measurement history so far.
+ * @param config           Supplies `information_gradient_step` (finite
+ *        difference step h), `exploration_amplitude`/`exploration_decay`
+ *        (envelope cap), and `information_exploration_gain` (gradient
+ *        scale).
+ * @param step             Current closed-loop step index, used to decay the
+ *        envelope over time.
+ * @return {0,0} if preconditions fail, the gradient is non-finite, or the
+ *         gradient norm is negligible (< 1e-9); otherwise a vector along
+ *         the ascent direction of the logdet score, magnitude-capped by the
+ *         decaying envelope.
+ */
 Vec2 information_driven_excitation(
     const Vec2& robot,
     const Vec2& target_estimate,
@@ -373,6 +608,8 @@ Vec2 information_driven_excitation(
         return {0.0, 0.0};
     }
 
+    // Central finite-difference gradient of the predicted logdet score
+    // w.r.t. the candidate robot position (x then y), step size h.
     const double h = std::max(1e-4, config.information_gradient_step);
     const double sx_plus = predicted_local_logdet_score(
         {robot.x + h, robot.y}, target_estimate, state, beacon_estimates, path, measurements);
@@ -392,6 +629,9 @@ Vec2 information_driven_excitation(
         return {0.0, 0.0};
     }
 
+    // Cap the excitation magnitude by a decaying envelope (same shape as
+    // the fixed circular schedule) so early steps explore more and the
+    // controller settles down over time even if the gradient stays large.
     const double envelope =
         config.exploration_amplitude *
         std::exp(-config.exploration_decay * static_cast<double>(step - 1));
@@ -401,6 +641,16 @@ Vec2 information_driven_excitation(
     return gradient * (magnitude / gradient_norm);
 }
 
+/**
+ * @brief Forward measurement model used by the EKF (run_ekf_local_frame_trial):
+ * given the current scenario-1 state estimate and the known robot position,
+ * predicts the 4-vector [rv, bv_local, rt, bt_local] that a
+ * LocalFrameMeasurement of `measurement.beacon` would report. Distinct from
+ * predicted_local_frame_measurement() in that it reads the beacon
+ * pose/target directly out of the flattened state vector rather than a
+ * BeaconEstimate struct, since the EKF represents the whole joint state
+ * (not just one beacon) as a single vector.
+ */
 std::vector<double> local_frame_measurement_prediction(
     const std::vector<double>& state,
     const Vec2& robot,
@@ -420,6 +670,10 @@ std::vector<double> local_frame_measurement_prediction(
     };
 }
 
+/** @brief Flattens a LocalFrameMeasurement into the same [rv, bv_local, rt,
+ *  bt_local] ordering produced by local_frame_measurement_prediction(), so
+ *  predicted and observed measurements can be subtracted element-wise to
+ *  form the EKF innovation. */
 std::vector<double> local_frame_measurement_vector(const LocalFrameMeasurement& measurement) {
     return {
         measurement.rv,
@@ -429,6 +683,17 @@ std::vector<double> local_frame_measurement_vector(const LocalFrameMeasurement& 
     };
 }
 
+/**
+ * @brief Generates local-frame measurements for every (time, beacon) pair
+ * along `path`, applying the MeasurementStress pipeline on top of ordinary
+ * sensor noise: field-of-view culling (discard if either local bearing
+ * exceeds `fov_half_angle`), then Bernoulli dropout (discard entirely,
+ * simulating a missed detection), then Bernoulli-triggered outlier
+ * corruption (adds/subtracts a fixed range/bearing magnitude with a random
+ * sign, simulating a gross sensor error rather than ordinary Gaussian
+ * noise). The dropout/FOV/outlier decisions and signs are all drawn from
+ * `rng` in a fixed order, so results are reproducible for a given seed.
+ */
 std::vector<LocalFrameMeasurement> generate_stressed_local_measurements(
     const World& world,
     const std::vector<Vec2>& path,
@@ -443,17 +708,27 @@ std::vector<LocalFrameMeasurement> generate_stressed_local_measurements(
 
     for (std::size_t time = 0; time < path.size(); ++time) {
         for (std::size_t beacon = 0; beacon < world.beacons.size(); ++beacon) {
+            // Start from an ordinary noisy measurement, then apply stress.
             auto measurement = make_local_frame_measurement(
                 world, path[time], beacon, time, noise, rng);
 
+            // Field-of-view gate: discard if either local bearing (to the
+            // vehicle or to the target) falls outside the sensor's half
+            // angle.
             if (stress.use_fov &&
                 (std::abs(wrap_angle(measurement.bv_local)) > stress.fov_half_angle ||
                  std::abs(wrap_angle(measurement.bt_local)) > stress.fov_half_angle)) {
                 continue;
             }
+            // Dropout: simulate a missed detection by discarding the
+            // measurement entirely (Bernoulli draw).
             if (dropout(rng)) {
                 continue;
             }
+            // Outlier: corrupt range/bearing by a fixed magnitude with a
+            // random sign (gross sensor error), applied with opposite signs
+            // to the vehicle- and target-range/bearing terms so the
+            // corruption isn't simply cancelled out downstream.
             if (outlier(rng)) {
                 const double range_sign = sign(rng) ? 1.0 : -1.0;
                 const double bearing_sign = sign(rng) ? 1.0 : -1.0;
@@ -470,6 +745,13 @@ std::vector<LocalFrameMeasurement> generate_stressed_local_measurements(
     return measurements;
 }
 
+/**
+ * @brief Returns a copy of `path` with independent zero-mean Gaussian noise
+ * (std-dev `position_sigma`) added to each x/y coordinate, modeling
+ * imperfect vehicle self-localization ("known" path used by the estimator
+ * differs from the true path used to generate measurements). Returns
+ * `path` unchanged when `position_sigma <= 0`.
+ */
 std::vector<Vec2> make_noisy_path(
     const std::vector<Vec2>& path,
     double position_sigma,
@@ -486,6 +768,16 @@ std::vector<Vec2> make_noisy_path(
     return noisy_path;
 }
 
+/**
+ * @brief Returns a copy of `path` perturbed by an accumulating random-walk
+ * drift: at each step, Gaussian noise scaled by `drift_fraction` times the
+ * true step length is added to a running drift offset, which is then
+ * applied to that step's position. Models dead-reckoning-style drift in
+ * the vehicle's self-localization estimate, as opposed to the iid noise of
+ * make_noisy_path(). The first path point is left unperturbed (drift starts
+ * at zero). Returns `path` unchanged when `drift_fraction <= 0` or `path`
+ * is empty.
+ */
 std::vector<Vec2> make_drifted_path(
     const std::vector<Vec2>& path,
     double drift_fraction,
@@ -507,6 +799,19 @@ std::vector<Vec2> make_drifted_path(
     return drifted_path;
 }
 
+/**
+ * @brief Applies a Huber robust-loss reweighting to a vector of whitened
+ * residuals: residuals within `delta` are left unchanged (behaving as
+ * ordinary least squares), while residuals beyond `delta` are soft-clipped
+ * to sqrt(delta * |residual|) (sign-preserved), so squaring this in the
+ * Gauss-Newton cost reproduces the Huber loss's linear (rather than
+ * quadratic) growth for large residuals. This is what "robust" estimator
+ * variants use in place of huber_delta &lt;= 0 (plain least squares).
+ *
+ * @param residuals Whitened residual vector (modified copy is returned).
+ * @param delta     Huber transition point; passing <= 0 disables robust
+ *        reweighting and returns `residuals` unchanged.
+ */
 std::vector<double> huber_scaled_residuals(
     std::vector<double> residuals,
     double delta) {
@@ -522,58 +827,25 @@ std::vector<double> huber_scaled_residuals(
     return residuals;
 }
 
-std::vector<std::vector<double>> identity_matrix(int n, double scale = 1.0) {
-    std::vector<std::vector<double>> matrix(
-        static_cast<std::size_t>(n), std::vector<double>(static_cast<std::size_t>(n), 0.0));
-    for (int i = 0; i < n; ++i) {
-        matrix[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = scale;
-    }
-    return matrix;
-}
+// identity_matrix() and the dense linear solve previously defined here now
+// live in Matrix.hpp/Matrix.cpp as identity_matrix() and
+// solve_dense_linear_system(..., SingularPivotPolicy::ReturnZero) --
+// shared with Solver.cpp's Gauss-Newton solve, which uses the same
+// elimination with SingularPivotPolicy::RegularizeDiagonal instead. See
+// Matrix.hpp for why the two singular-pivot behaviors differ.
 
-std::vector<double> solve_dense_system(
-    std::vector<std::vector<double>> a,
-    std::vector<double> b) {
-    const int n = static_cast<int>(b.size());
-    for (int col = 0; col < n; ++col) {
-        int pivot = col;
-        double pivot_value = std::abs(a[static_cast<std::size_t>(col)][static_cast<std::size_t>(col)]);
-        for (int row = col + 1; row < n; ++row) {
-            const double value = std::abs(a[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)]);
-            if (value > pivot_value) {
-                pivot = row;
-                pivot_value = value;
-            }
-        }
-        if (pivot_value < 1e-12) {
-            return std::vector<double>(static_cast<std::size_t>(n), 0.0);
-        }
-        if (pivot != col) {
-            std::swap(a[static_cast<std::size_t>(pivot)], a[static_cast<std::size_t>(col)]);
-            std::swap(b[static_cast<std::size_t>(pivot)], b[static_cast<std::size_t>(col)]);
-        }
-
-        const double diagonal = a[static_cast<std::size_t>(col)][static_cast<std::size_t>(col)];
-        for (int j = col; j < n; ++j) {
-            a[static_cast<std::size_t>(col)][static_cast<std::size_t>(j)] /= diagonal;
-        }
-        b[static_cast<std::size_t>(col)] /= diagonal;
-
-        for (int row = 0; row < n; ++row) {
-            if (row == col) {
-                continue;
-            }
-            const double factor = a[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)];
-            for (int j = col; j < n; ++j) {
-                a[static_cast<std::size_t>(row)][static_cast<std::size_t>(j)] -=
-                    factor * a[static_cast<std::size_t>(col)][static_cast<std::size_t>(j)];
-            }
-            b[static_cast<std::size_t>(row)] -= factor * b[static_cast<std::size_t>(col)];
-        }
-    }
-    return b;
-}
-
+/**
+ * @brief Approximates the EKF's initial state covariance from the
+ * whitened information matrix J^T J of the full multi-beacon scenario-1
+ * Jacobian (not the single-beacon 5x5 gauge matrix), inverting it via
+ * solve_dense_linear_system() one basis column at a time. A small ridge
+ * (1e-6) is added to the diagonal before inversion to keep the matrix
+ * numerically invertible even when some directions are weakly observed.
+ * Used only when seeding the EKF from the two-view closed-form initializer
+ * (two_view_closed_form_initial_state), to give the filter a covariance
+ * consistent with the information actually available at seed time rather
+ * than an arbitrary generic prior.
+ */
 std::vector<std::vector<double>> covariance_from_local_information(
     const std::vector<double>& state,
     const std::vector<Vec2>& path,
@@ -581,17 +853,7 @@ std::vector<std::vector<double>> covariance_from_local_information(
     const Noise& noise) {
     const auto jacobian = jacobian_scenario1(state, 1, path, measurements, noise);
     const int state_dim = static_cast<int>(state.size());
-    std::vector<std::vector<double>> normal(
-        static_cast<std::size_t>(state_dim),
-        std::vector<double>(static_cast<std::size_t>(state_dim), 0.0));
-    for (const auto& row : jacobian) {
-        for (int i = 0; i < state_dim; ++i) {
-            for (int j = 0; j < state_dim; ++j) {
-                normal[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] +=
-                    row[static_cast<std::size_t>(i)] * row[static_cast<std::size_t>(j)];
-            }
-        }
-    }
+    Matrix normal = gram_matrix(jacobian);
     for (int i = 0; i < state_dim; ++i) {
         normal[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] += 1e-6;
     }
@@ -602,7 +864,7 @@ std::vector<std::vector<double>> covariance_from_local_information(
     for (int col = 0; col < state_dim; ++col) {
         std::vector<double> rhs(static_cast<std::size_t>(state_dim), 0.0);
         rhs[static_cast<std::size_t>(col)] = 1.0;
-        const auto solution = solve_dense_system(normal, rhs);
+        const auto solution = solve_dense_linear_system(normal, rhs, SingularPivotPolicy::ReturnZero);
         for (int row = 0; row < state_dim; ++row) {
             covariance[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)] =
                 solution[static_cast<std::size_t>(row)];
@@ -611,6 +873,17 @@ std::vector<std::vector<double>> covariance_from_local_information(
     return covariance;
 }
 
+/**
+ * @brief Computes the EKF measurement Jacobian H = d(prediction)/d(state)
+ * for one LocalFrameMeasurement via central finite differences (step
+ * 1e-6) on local_frame_measurement_prediction(), wrapping the bearing rows
+ * (1 and 3, i.e. bv_local and bt_local) to avoid a spurious large
+ * derivative across the +-pi discontinuity. Used in place of an analytic
+ * Jacobian because the EKF only touches one beacon's block of the state at
+ * a time but must still differentiate against the full state vector.
+ *
+ * @return A 4 x state_dim matrix (rows: rv, bv_local, rt, bt_local).
+ */
 std::vector<std::vector<double>> finite_difference_local_measurement_jacobian(
     const std::vector<double>& state,
     const Vec2& robot,
@@ -640,6 +913,38 @@ std::vector<std::vector<double>> finite_difference_local_measurement_jacobian(
     return jacobian;
 }
 
+/**
+ * @brief Runs the EKF (Extended Kalman Filter) alternative to the batch
+ * Gauss-Newton scenario-1 solve: instead of solving the whole nonlinear
+ * least-squares problem at once, this ingests `measurements` one at a time
+ * in generation order, updating a state estimate and covariance matrix
+ * after every single measurement using a finite-difference measurement
+ * Jacobian and the standard EKF (Joseph-form) gain/covariance update. A
+ * small fixed process-noise diagonal (1e-5) is injected before every
+ * update, treating the state as a slow random walk to keep the filter from
+ * becoming overconfident/inconsistent over many updates.
+ *
+ * @param beacon_count              Number of beacons (only beacon_count==1
+ *        supports the two-view closed-form seed).
+ * @param trial                     Trial index recorded in the result.
+ * @param world                     Ground-truth world.
+ * @param path                      Known vehicle path.
+ * @param config                    Supplies the initial seed
+ *        (`initial_target_estimate`, `initial_beacon_guess_radius/yaw`).
+ * @param noise                     Measurement noise model (defines the
+ *        fixed per-measurement covariance `measurement_variance`).
+ * @param use_two_view_initialization When true and `beacon_count == 1`,
+ *        seeds the filter from two_view_closed_form_initial_state() with a
+ *        covariance derived from the local information matrix
+ *        (covariance_from_local_information) instead of the generic
+ *        circular seed; this is scenario 4 vs. scenario 3.
+ * @param rng                       Random engine used to draw measurement
+ *        noise when generating `measurements`.
+ * @return A TrialResult with scenario set to 3 (generic seed) or 4
+ *         (two-view seed), `solver_converged` always true (the EKF has no
+ *         notion of non-convergence), and `converged` set by
+ *         trial_accuracy_success() against the final EKF state.
+ */
 TrialResult run_ekf_local_frame_trial(
     int beacon_count,
     int trial,
@@ -653,6 +958,9 @@ TrialResult run_ekf_local_frame_trial(
     const auto measurements = generate_local_frame_measurements(world, path, noise, rng);
     const auto start = std::chrono::steady_clock::now();
 
+    // Default seed: generic coarse circular beacon layout (same seed used
+    // by the batch solver), with a wide diagonal covariance (25 for
+    // position, 9 for yaw) reflecting how little is known a priori.
     std::vector<double> state = initial_state_scenario1(
         beacon_count,
         config.initial_target_estimate,
@@ -665,6 +973,10 @@ TrialResult run_ekf_local_frame_trial(
         covariance[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] =
             is_yaw ? 9.0 : 25.0;
     }
+    // Optional constructive seed: replace the generic seed/covariance with
+    // the two-view closed-form estimate and an information-derived
+    // covariance (scenario 4), falling back to the generic seed above if
+    // no sufficiently-excited view pair exists.
     if (use_two_view_initialization && beacon_count == 1) {
         std::vector<double> closed_form_state;
         if (two_view_closed_form_initial_state(beacon_count, path, measurements, closed_form_state)) {
@@ -677,6 +989,10 @@ TrialResult run_ekf_local_frame_trial(
         }
     }
 
+    // Fixed per-measurement-component noise variance (falls back to the
+    // scenario defaults 0.03/0.006 when noise sigmas are non-positive,
+    // matching effective_range_sigma/effective_bearing_sigma in
+    // Estimators.cpp).
     const double range_variance =
         std::pow(noise.range_sigma > 0.0 ? noise.range_sigma : 0.03, 2.0);
     const double bearing_variance =
@@ -684,11 +1000,20 @@ TrialResult run_ekf_local_frame_trial(
     const std::array<double, 4> measurement_variance{
         range_variance, bearing_variance, range_variance, bearing_variance};
 
+    // Sequential EKF update: process one measurement at a time in
+    // generation order (i.e. time-then-beacon order from
+    // generate_local_frame_measurements).
     for (const auto& measurement : measurements) {
+        // Process-noise injection: treat the state as a slow random walk so
+        // the filter's confidence never collapses to zero even after many
+        // updates (keeps it from becoming inconsistently overconfident).
         for (int i = 0; i < state_dim; ++i) {
             covariance[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] += 1e-5;
         }
 
+        // Innovation: observed minus predicted measurement, with the two
+        // bearing components wrapped to (-pi, pi] to avoid a spurious large
+        // innovation across the +-pi discontinuity.
         const Vec2& robot = path[measurement.time];
         const auto predicted = local_frame_measurement_prediction(state, robot, measurement);
         const auto observed = local_frame_measurement_vector(measurement);
@@ -702,47 +1027,37 @@ TrialResult run_ekf_local_frame_trial(
             }
         }
 
+        // Innovation covariance S = H P H^T + R (R = measurement_variance
+        // on the diagonal).
         const auto h_matrix = finite_difference_local_measurement_jacobian(state, robot, measurement);
-        std::vector<std::vector<double>> innovation_covariance(
-            4, std::vector<double>(4, 0.0));
+        Matrix innovation_covariance = sandwich(h_matrix, covariance);
         for (int row = 0; row < 4; ++row) {
-            for (int col = 0; col < 4; ++col) {
-                double value = 0.0;
-                for (int i = 0; i < state_dim; ++i) {
-                    for (int j = 0; j < state_dim; ++j) {
-                        value += h_matrix[static_cast<std::size_t>(row)][static_cast<std::size_t>(i)] *
-                            covariance[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] *
-                            h_matrix[static_cast<std::size_t>(col)][static_cast<std::size_t>(j)];
-                    }
-                }
-                innovation_covariance[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)] = value;
-            }
             innovation_covariance[static_cast<std::size_t>(row)][static_cast<std::size_t>(row)] +=
                 measurement_variance[static_cast<std::size_t>(row)];
         }
 
+        // Kalman gain K = P H^T S^-1: first P H^T (state_dim x 4), then
+        // column-by-column solve S^T k_row = e_row for each basis vector (S
+        // is symmetric, so this is equivalent to solving against S
+        // directly).
+        const Matrix p_ht = matmul(covariance, transpose(h_matrix));
         std::vector<std::vector<double>> kalman_gain(
             static_cast<std::size_t>(state_dim), std::vector<double>(4, 0.0));
         for (int i = 0; i < state_dim; ++i) {
-            std::vector<double> p_ht(4, 0.0);
-            for (int row = 0; row < 4; ++row) {
-                for (int j = 0; j < state_dim; ++j) {
-                    p_ht[static_cast<std::size_t>(row)] +=
-                        covariance[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] *
-                        h_matrix[static_cast<std::size_t>(row)][static_cast<std::size_t>(j)];
-                }
-            }
             for (int row = 0; row < 4; ++row) {
                 std::vector<double> basis(4, 0.0);
                 basis[static_cast<std::size_t>(row)] = 1.0;
-                const auto column = solve_dense_system(innovation_covariance, basis);
+                const auto column =
+                    solve_dense_linear_system(innovation_covariance, basis, SingularPivotPolicy::ReturnZero);
                 for (int k = 0; k < 4; ++k) {
                     kalman_gain[static_cast<std::size_t>(i)][static_cast<std::size_t>(row)] +=
-                        p_ht[static_cast<std::size_t>(k)] * column[static_cast<std::size_t>(k)];
+                        p_ht[static_cast<std::size_t>(i)][static_cast<std::size_t>(k)] *
+                        column[static_cast<std::size_t>(k)];
                 }
             }
         }
 
+        // State update: x <- x + K * innovation.
         for (int i = 0; i < state_dim; ++i) {
             double dx = 0.0;
             for (int row = 0; row < 4; ++row) {
@@ -752,21 +1067,12 @@ TrialResult run_ekf_local_frame_trial(
             state[static_cast<std::size_t>(i)] += dx;
         }
 
-        std::vector<std::vector<double>> kh(
-            static_cast<std::size_t>(state_dim),
-            std::vector<double>(static_cast<std::size_t>(state_dim), 0.0));
-        for (int i = 0; i < state_dim; ++i) {
-            for (int j = 0; j < state_dim; ++j) {
-                for (int row = 0; row < 4; ++row) {
-                    kh[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] +=
-                        kalman_gain[static_cast<std::size_t>(i)][static_cast<std::size_t>(row)] *
-                        h_matrix[static_cast<std::size_t>(row)][static_cast<std::size_t>(j)];
-                }
-            }
-        }
-
-        std::vector<std::vector<double>> identity_minus_kh =
-            identity_matrix(state_dim);
+        // Covariance update in Joseph ("stabilized") form:
+        //   P <- (I - K H) P (I - K H)^T + K R K^T
+        // which is more numerically robust to a slightly wrong/asymmetric
+        // gain than the simpler P <- (I - K H) P update.
+        const Matrix kh = matmul(kalman_gain, h_matrix);
+        Matrix identity_minus_kh = identity_matrix(state_dim);
         for (int i = 0; i < state_dim; ++i) {
             for (int j = 0; j < state_dim; ++j) {
                 identity_minus_kh[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] -=
@@ -774,29 +1080,10 @@ TrialResult run_ekf_local_frame_trial(
             }
         }
 
-        std::vector<std::vector<double>> left_product(
-            static_cast<std::size_t>(state_dim),
-            std::vector<double>(static_cast<std::size_t>(state_dim), 0.0));
+        const Matrix left_product = matmul(identity_minus_kh, covariance);
+        Matrix updated = matmul(left_product, transpose(identity_minus_kh));
         for (int i = 0; i < state_dim; ++i) {
             for (int j = 0; j < state_dim; ++j) {
-                for (int k = 0; k < state_dim; ++k) {
-                    left_product[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] +=
-                        identity_minus_kh[static_cast<std::size_t>(i)][static_cast<std::size_t>(k)] *
-                        covariance[static_cast<std::size_t>(k)][static_cast<std::size_t>(j)];
-                }
-            }
-        }
-
-        std::vector<std::vector<double>> updated(
-            static_cast<std::size_t>(state_dim),
-            std::vector<double>(static_cast<std::size_t>(state_dim), 0.0));
-        for (int i = 0; i < state_dim; ++i) {
-            for (int j = 0; j < state_dim; ++j) {
-                for (int k = 0; k < state_dim; ++k) {
-                    updated[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] +=
-                        left_product[static_cast<std::size_t>(i)][static_cast<std::size_t>(k)] *
-                        identity_minus_kh[static_cast<std::size_t>(j)][static_cast<std::size_t>(k)];
-                }
                 for (int row = 0; row < 4; ++row) {
                     updated[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] +=
                         kalman_gain[static_cast<std::size_t>(i)][static_cast<std::size_t>(row)] *
@@ -827,12 +1114,22 @@ TrialResult run_ekf_local_frame_trial(
             trial_accuracy_success(target_error, beacon_position_error, beacon_yaw_error)};
 }
 
+/** @brief Elapsed wall-clock time in milliseconds between two steady_clock
+ *  time points; used throughout to fill each TrialResult's `runtime_ms`. */
 double elapsed_ms(
     const std::chrono::steady_clock::time_point& start,
     const std::chrono::steady_clock::time_point& stop) {
     return std::chrono::duration<double, std::milli>(stop - start).count();
 }
 
+/**
+ * @brief 95% confidence half-width for the sample mean of a scalar
+ * quantity, given only running sums (sum of values, sum of squared values)
+ * and the sample count, using the normal approximation (1.96 * standard
+ * error). Returns 0.0 when fewer than 2 samples are available (sample
+ * variance is undefined). Used for the CI columns on SummaryRow's mean
+ * error and mean beacon RMSE fields.
+ */
 double mean_ci95_from_sums(double sum, double sum2, int count) {
     if (count < 2) {
         return 0.0;
@@ -844,6 +1141,14 @@ double mean_ci95_from_sums(double sum, double sum2, int count) {
     return 1.96 * std::sqrt(variance / static_cast<double>(count));
 }
 
+/**
+ * @brief 95% confidence half-width for an RMSE statistic (sqrt of a mean
+ * squared error), propagated from the delta-method approximation: the CI
+ * on the mean squared error (derived from sum_error2, sum_error4, the sums
+ * of error^2 and error^4) is halved and divided by the RMSE itself, since
+ * d(sqrt(x))/dx = 1/(2*sqrt(x)). Returns 0.0 when fewer than 2 samples are
+ * available or the mean squared error is non-positive.
+ */
 double rmse_ci95_from_sums(double sum_error2, double sum_error4, int count) {
     if (count < 2 || sum_error2 <= 0.0) {
         return 0.0;
@@ -857,6 +1162,48 @@ double rmse_ci95_from_sums(double sum_error2, double sum_error4, int count) {
     return 1.96 * se_mean_square / (2.0 * rmse);
 }
 
+/**
+ * @brief Core single-solve scenario-1 batch trial: given an already-drawn
+ * set of measurements and an initial seed, optionally overrides the seed
+ * with the two-view closed-form estimate, optionally runs a robust
+ * "warm-start" pass, then runs the final damped Gauss-Newton solve
+ * (analytic Jacobian for the plain solve, finite-difference Jacobian for
+ * the robust solve since Huber-reweighted residuals have no closed-form
+ * Jacobian here) and packages the result into a TrialResult. This is the
+ * common implementation shared by run_local_batch_trial_with_seed(),
+ * run_multistart_local_batch_trial(), and most of the robustness sweeps.
+ *
+ * @param trial                 Trial index recorded in the result.
+ * @param beacon_count          Number of beacons.
+ * @param world                 Ground-truth world (for error computation).
+ * @param estimator_path        Vehicle path used by the estimator (may
+ *        differ from the true path that generated `measurements`, e.g.
+ *        under vehicle-localization noise).
+ * @param measurements          Pre-generated (possibly stressed) local-frame
+ *        measurements.
+ * @param config                Supplies `batch_solver_max_iterations` /
+ *        `batch_solver_initial_lambda`.
+ * @param residual_noise        Noise model used to whiten residuals (should
+ *        match the noise the measurements were generated with, for a
+ *        correctly-scaled cost).
+ * @param initial_state         Fallback seed used when
+ *        `use_closed_form_seed` is false or the closed-form seed fails.
+ * @param robust                If true, reweights residuals with
+ *        huber_scaled_residuals(robust_delta) and first runs a shorter
+ *        "warm start" solve at half the iteration budget with the analytic
+ *        Jacobian and un-reweighted residuals before the final robust
+ *        solve (helps the robust solve start from a decent basin).
+ * @param robust_delta          Huber transition point (see
+ *        huber_scaled_residuals).
+ * @param use_closed_form_seed  Whether to attempt overriding `initial_state`
+ *        with two_view_closed_form_initial_state().
+ * @param repeat_target_packets Forwarded to residuals_scenario1/
+ *        jacobian_scenario1; when false, only the first target packet per
+ *        beacon is used (see "single_target_packet_batch_gn" in
+ *        run_expanded_baseline_comparison).
+ * @return TrialResult with scenario fixed to 1; `iterations` is the sum of
+ *         the warm-start and final solve's iteration counts.
+ */
 TrialResult run_local_batch_trial_with_measurements(
     int trial,
     int beacon_count,
@@ -880,6 +1227,10 @@ TrialResult run_local_batch_trial_with_measurements(
     }
     int warm_start_iterations = 0;
     if (robust) {
+        // Warm-start pass: solve the un-reweighted (ordinary least squares)
+        // problem first with a shorter iteration budget, so the subsequent
+        // Huber-robust solve starts near a good basin rather than from the
+        // raw seed.
         const auto warm_start = gauss_newton(
             seed,
             [&](const std::vector<double>& state) {
@@ -921,6 +1272,15 @@ TrialResult run_local_batch_trial_with_measurements(
             result.converged, trial_accuracy_success(target_error, beacon_position_error, beacon_yaw_error)};
 }
 
+/**
+ * @brief Convenience wrapper around run_local_batch_trial_with_measurements()
+ * that first draws stressed measurements from `true_path` and builds the
+ * generic circular initial seed from the given target/beacon-radius/yaw
+ * seed values, then solves against `estimator_path` (which may be a noisy
+ * or drifted version of `true_path` — see make_noisy_path/make_drifted_path).
+ * Uses the closed-form seed override by default (inherited default
+ * argument of the wrapped function).
+ */
 TrialResult run_local_batch_trial_with_seed(
     int trial,
     int beacon_count,
@@ -951,6 +1311,26 @@ TrialResult run_local_batch_trial_with_seed(
         config.robust_huber_delta);
 }
 
+/**
+ * @brief Multistart batch trial (see glossary concept "Multistart"): draws
+ * one set of stressed measurements, then runs
+ * run_local_batch_trial_with_measurements() from `multistarts` different
+ * perturbed initial seeds and keeps whichever converged result has the
+ * lowest final cost. Mitigates sensitivity to a poor initialization / local
+ * minima in the nonlinear least-squares problem, especially under weak
+ * observability (see run_poor_initialization_sweep).
+ *
+ * @param multistarts Number of seeds to try; clamped to at least 1. The
+ *        first start (`start_index == 0`) always uses the nominal
+ *        target_seed/beacon_seed_radius/beacon_yaw_seed unperturbed; later
+ *        starts perturb the target seed around a circle of radius
+ *        `0.4 * beacon_seed_radius` and scale/rotate the beacon
+ *        radius/yaw guess.
+ * @return The lowest-cost TrialResult across all starts; `runtime_ms` is
+ *         overwritten with the *total* wall-clock time across all starts
+ *         (not just the winning one), since multistart's cost is the sum
+ *         of every attempt.
+ */
 TrialResult run_multistart_local_batch_trial(
     int trial,
     int beacon_count,
@@ -972,6 +1352,9 @@ TrialResult run_multistart_local_batch_trial(
     const int starts = std::max(1, multistarts);
     const auto multistart_start = std::chrono::steady_clock::now();
     for (int start_index = 0; start_index < starts; ++start_index) {
+        // Distribute additional starts evenly around a circle: perturb the
+        // target seed tangentially and vary the beacon radius/yaw guess so
+        // each start probes a genuinely different basin of attraction.
         const double angle = 2.0 * kPi * static_cast<double>(start_index) / static_cast<double>(starts);
         const Vec2 shifted_target{
             start_index == 0 ? target_seed.x : target_seed.x + 0.4 * beacon_seed_radius * std::cos(angle),
@@ -995,6 +1378,7 @@ TrialResult run_multistart_local_batch_trial(
             initial_state,
             robust,
             config.robust_huber_delta);
+        // Keep the best (lowest-cost) result seen so far across all starts.
         if (result.cost < best.cost) {
             best = result;
         }
@@ -1004,6 +1388,15 @@ TrialResult run_multistart_local_batch_trial(
     return best;
 }
 
+/**
+ * @brief Restricts `measurements` to only those whose `time` index falls
+ * within the most recent `window_size` time steps (i.e. a fixed-size
+ * trailing sliding window over the measurement history), used by the
+ * "sliding_window_gn" estimator variant in run_expanded_baseline_comparison
+ * to approximate a bounded-memory/receding-horizon batch solve instead of
+ * accumulating the full measurement history. Returns `measurements`
+ * unchanged if empty or `window_size <= 0`.
+ */
 std::vector<LocalFrameMeasurement> recent_measurement_window(
     const std::vector<LocalFrameMeasurement>& measurements,
     int window_size) {
@@ -1024,6 +1417,18 @@ std::vector<LocalFrameMeasurement> recent_measurement_window(
     return window;
 }
 
+/**
+ * @brief Dispatches one Monte Carlo trial for a given (world, path) pair
+ * across all four scenario IDs: 3/4 delegate to the EKF
+ * (run_ekf_local_frame_trial, generic vs. two-view seed); 1 draws
+ * local-frame measurements, seeds from the two-view closed-form estimator
+ * when it succeeds (falling back to the generic circular seed otherwise),
+ * and solves with damped Gauss-Newton using the analytic Jacobian; 2 (the
+ * default/else branch) draws global-frame bearing measurements and solves
+ * only for the 2D target position, deriving beacon estimates afterward by
+ * simple averaging (beacon_estimates_from_scenario2_measurements) rather
+ * than jointly optimizing them.
+ */
 TrialResult run_trial_with_world_path(
     int scenario,
     int beacon_count,
@@ -1048,6 +1453,9 @@ TrialResult run_trial_with_world_path(
             config.initial_target_estimate,
             config.initial_beacon_guess_radius,
             config.initial_beacon_guess_yaw);
+        // Prefer the constructive two-view closed-form seed when it
+        // succeeds (sufficiently excited view pair found for every
+        // beacon); otherwise keep the generic circular seed above.
         std::vector<double> closed_form_seed;
         if (two_view_closed_form_initial_state(beacon_count, path, measurements, closed_form_seed)) {
             initial_state = closed_form_seed;
@@ -1074,6 +1482,9 @@ TrialResult run_trial_with_world_path(
                 result.converged, trial_accuracy_success(target_error, beacon_position_error, beacon_yaw_error)};
     }
 
+    // Scenario 2 (calibrated global-frame baseline): only the 2D target
+    // position is jointly optimized; per-beacon estimates are derived
+    // afterward by simple averaging, not solved for directly.
     const auto measurements = generate_global_bearing_measurements(world, path, noise, rng);
     const auto start = std::chrono::steady_clock::now();
     const auto result = gauss_newton(
@@ -1097,6 +1508,8 @@ TrialResult run_trial_with_world_path(
 
 }  // namespace
 
+// See Simulation.hpp for the full contract. Implementation: forward-Euler
+// integration of the continuous adaptive law, one step per iteration.
 AdaptiveLocalizationRun run_adaptive_localization(
     const SimulationConfig& config,
     std::mt19937& rng) {
@@ -1107,11 +1520,17 @@ AdaptiveLocalizationRun run_adaptive_localization(
     points.reserve(static_cast<std::size_t>(config.adaptive_steps));
 
     for (int step = 0; step < config.adaptive_steps; ++step) {
+        // Draw this step's noisy range/bearing measurements, then apply the
+        // continuous adaptive update law phat_dot = -2*Gamma*sum_i(epsilon_i
+        // * ...), integrated forward with a fixed Euler step (adaptive_dt).
         const auto measurements = measure_core_model(world, robot, config.adaptive_noise, rng);
         const Vec2 target_dot = core_adaptive_update(
             robot, target_estimate, measurements, config.adaptive_gain);
         target_estimate = target_estimate + target_dot * config.adaptive_dt;
 
+        // Record this step's estimates/errors before advancing the robot,
+        // so the logged point reflects the estimate that produced the
+        // control below.
         AdaptiveLocalizationPoint point;
         point.step = step;
         point.robot = robot;
@@ -1122,6 +1541,10 @@ AdaptiveLocalizationRun run_adaptive_localization(
         point.cost = core_cost(robot, target_estimate, measurements);
         points.push_back(point);
 
+        // Target-seeking control law xi_dot = -k(xi - phat): drive the
+        // robot toward the current target estimate (there is no separate
+        // excitation term in this rigorous global-frame model, unlike the
+        // closed-loop scenario-1/2 comparison below).
         const Vec2 control = (target_estimate - robot) * config.adaptive_target_seeking_gain;
         robot = robot + control * config.adaptive_dt;
     }
@@ -1129,6 +1552,8 @@ AdaptiveLocalizationRun run_adaptive_localization(
     return {world, points};
 }
 
+// See Simulation.hpp: delegates to the beacon-count-explicit overload using
+// config.closed_loop_beacon_count.
 ClosedLoopResult run_closed_loop_comparison(
     int scenario,
     const SimulationConfig& config,
@@ -1136,6 +1561,8 @@ ClosedLoopResult run_closed_loop_comparison(
     return run_closed_loop_comparison(scenario, config.closed_loop_beacon_count, config, rng);
 }
 
+// See Simulation.hpp: delegates to the full overload with the default
+// fixed decaying-circular excitation schedule.
 ClosedLoopResult run_closed_loop_comparison(
     int scenario,
     int beacon_count,
@@ -1145,6 +1572,10 @@ ClosedLoopResult run_closed_loop_comparison(
         scenario, beacon_count, config, rng, ClosedLoopExcitationMode::Circular);
 }
 
+// Full implementation; see Simulation.hpp for the contract. Each step:
+// take a measurement, re-solve the batch estimate from scratch with the
+// full history so far, evaluate the excitation policy, then advance the
+// robot with target-seeking control plus the chosen excitation term.
 ClosedLoopResult run_closed_loop_comparison(
     int scenario,
     int beacon_count,
@@ -1168,6 +1599,8 @@ ClosedLoopResult run_closed_loop_comparison(
     Vec2 robot = config.initial_robot;
     Vec2 target_estimate = config.initial_target_estimate;
     double current_cost = 0.0;
+    // Step index at which the current excitation "epoch" began; only
+    // meaningful/updated in Supervised mode, where retriggering resets it.
     int excitation_epoch = 1;
 
     ClosedLoopPoint initial_point;
@@ -1184,6 +1617,8 @@ ClosedLoopResult run_closed_loop_comparison(
     points.push_back(initial_point);
 
     for (int step = 1; step <= config.closed_loop_steps; ++step) {
+        // Record the current robot position as a new path pose and take one
+        // measurement of every beacon from it.
         path.push_back(robot);
         for (std::size_t i = 0; i < world.beacons.size(); ++i) {
             if (scenario == 1) {
@@ -1195,6 +1630,11 @@ ClosedLoopResult run_closed_loop_comparison(
             }
         }
 
+        // Re-solve the batch estimate from scratch using the *entire*
+        // measurement history accumulated so far (warm-started from the
+        // previous step's state), for scenario 1 (joint target+beacon
+        // self-calibration) or scenario 2 (target-only, beacons averaged
+        // afterward).
         if (scenario == 1) {
             const auto result = gauss_newton(
                 state1,
@@ -1222,6 +1662,11 @@ ClosedLoopResult run_closed_loop_comparison(
                 target_estimate, beacon_count, global_measurements);
         }
 
+        // Excitation-supervised gate (Algorithm 1, CDC closed-loop paper):
+        // if the recent trajectory is under-excited (low spread) or the
+        // single-beacon local observability is rank-deficient or has a
+        // small sigma_min, retrigger the excitation epoch (resets the decay
+        // clock below) instead of letting the fixed schedule keep decaying.
         bool retriggered = false;
         if (excitation_mode == ClosedLoopExcitationMode::Supervised) {
             const auto observability =
@@ -1236,6 +1681,10 @@ ClosedLoopResult run_closed_loop_comparison(
             }
         }
 
+        // Decaying circular "swirl" excitation term: amplitude decays
+        // exponentially since the start of the current epoch (Supervised
+        // mode measures decay/phase relative to the last retrigger;
+        // Circular/Information modes measure relative to step 0).
         const double decay_reference = excitation_mode == ClosedLoopExcitationMode::Supervised
             ? static_cast<double>(step - excitation_epoch)
             : static_cast<double>(step - 1);
@@ -1248,6 +1697,10 @@ ClosedLoopResult run_closed_loop_comparison(
             exploration * std::cos(config.exploration_frequency * phase_reference),
             exploration * std::sin(config.exploration_frequency * phase_reference),
         };
+        // In Information mode, replace the fixed swirl with the greedy
+        // logdet-gradient excitation (information_driven_excitation);
+        // Circular and Supervised modes both use the swirl (Supervised only
+        // differs in when the swirl's clock resets).
         Vec2 excitation = swirl;
         if (excitation_mode == ClosedLoopExcitationMode::Information) {
             excitation = information_driven_excitation(
@@ -1260,6 +1713,8 @@ ClosedLoopResult run_closed_loop_comparison(
                 config,
                 step);
         }
+        // Target-seeking control plus excitation, integrated with a fixed
+        // Euler step (closed_loop_dt).
         robot = robot + ((target_estimate - robot) * config.closed_loop_control_gain + excitation) *
             config.closed_loop_dt;
 
@@ -1280,6 +1735,8 @@ ClosedLoopResult run_closed_loop_comparison(
     return {scenario, world, points, beacon_estimates, target_estimate};
 }
 
+// See Simulation.hpp. Runs the same single-beacon closed loop twice from
+// paired RNG seeds, once per excitation policy, and reports final accuracy.
 std::vector<ActiveExcitationComparisonRow> run_active_excitation_comparison(
     const SimulationConfig& config) {
     const auto make_row = [](const std::string& name, const ClosedLoopResult& result) {
@@ -1297,11 +1754,15 @@ std::vector<ActiveExcitationComparisonRow> run_active_excitation_comparison(
         return row;
     };
 
-    std::mt19937 circular_rng(config.closed_loop_seed + 200U);
+    // Seed base shared by both policies below so the underlying noise
+    // draws are directly comparable; other sweeps use their own bases
+    // purely to keep unrelated RNG streams decorrelated from each other.
+    constexpr unsigned int kExcitationPolicyComparisonSeedBase = 200U;
+    std::mt19937 circular_rng(config.closed_loop_seed + kExcitationPolicyComparisonSeedBase);
     const auto circular = run_closed_loop_comparison(
         1, 1, config, circular_rng, ClosedLoopExcitationMode::Circular);
 
-    std::mt19937 information_rng(config.closed_loop_seed + 200U);
+    std::mt19937 information_rng(config.closed_loop_seed + kExcitationPolicyComparisonSeedBase);
     const auto information = run_closed_loop_comparison(
         1, 1, config, information_rng, ClosedLoopExcitationMode::Information);
 
@@ -1311,6 +1772,15 @@ std::vector<ActiveExcitationComparisonRow> run_active_excitation_comparison(
     };
 }
 
+// Shared RNG seed base for every fixed-vs-supervised excitation comparison
+// below (run_supervised_excitation_comparison's run_pair lambda and
+// run_supervised_lambda_sweep): both policies in a pair start from the same
+// seed so their noise draws are directly comparable; the value itself only
+// needs to differ from other sweeps' bases to keep unrelated RNG streams
+// decorrelated.
+constexpr unsigned int kFixedVsSupervisedSeedBase = 300U;
+
+// See Simulation.hpp for the full contract.
 std::vector<SupervisedExcitationComparisonRow> run_supervised_excitation_comparison(
     const SimulationConfig& config) {
     const auto steps_to_threshold = [](const std::vector<ClosedLoopPoint>& points, double threshold,
@@ -1349,11 +1819,11 @@ std::vector<SupervisedExcitationComparisonRow> run_supervised_excitation_compari
     };
 
     const auto run_pair = [&](const std::string& suffix, const SimulationConfig& scenario_config) {
-        std::mt19937 circular_rng(scenario_config.closed_loop_seed + 300U);
+        std::mt19937 circular_rng(scenario_config.closed_loop_seed + kFixedVsSupervisedSeedBase);
         const auto circular = run_closed_loop_comparison(
             1, 1, scenario_config, circular_rng, ClosedLoopExcitationMode::Circular);
 
-        std::mt19937 supervised_rng(scenario_config.closed_loop_seed + 300U);
+        std::mt19937 supervised_rng(scenario_config.closed_loop_seed + kFixedVsSupervisedSeedBase);
         const auto supervised = run_closed_loop_comparison(
             1, 1, scenario_config, supervised_rng, ClosedLoopExcitationMode::Supervised);
 
@@ -1385,6 +1855,7 @@ std::vector<SupervisedExcitationComparisonRow> run_supervised_excitation_compari
     return rows;
 }
 
+// See Simulation.hpp for the full contract.
 std::vector<SupervisedLambdaSweepRow> run_supervised_lambda_sweep(
     const SimulationConfig& config) {
     const std::vector<double> lambdas{0.02, 0.05, 0.10, 0.25, 0.50, 1.0, 2.0};
@@ -1401,11 +1872,11 @@ std::vector<SupervisedLambdaSweepRow> run_supervised_lambda_sweep(
         sweep_config.initial_target_estimate = {1.2, -0.75};
         sweep_config.initial_robot = sweep_config.initial_target_estimate;
 
-        std::mt19937 fixed_rng(sweep_config.closed_loop_seed + 300U);
+        std::mt19937 fixed_rng(sweep_config.closed_loop_seed + kFixedVsSupervisedSeedBase);
         const auto fixed = run_closed_loop_comparison(
             1, 1, sweep_config, fixed_rng, ClosedLoopExcitationMode::Circular);
 
-        std::mt19937 supervised_rng(sweep_config.closed_loop_seed + 300U);
+        std::mt19937 supervised_rng(sweep_config.closed_loop_seed + kFixedVsSupervisedSeedBase);
         const auto supervised = run_closed_loop_comparison(
             1, 1, sweep_config, supervised_rng, ClosedLoopExcitationMode::Supervised);
 
@@ -1433,6 +1904,7 @@ std::vector<SupervisedLambdaSweepRow> run_supervised_lambda_sweep(
     return rows;
 }
 
+// See Simulation.hpp for the full contract.
 TrialResult run_trial(
     int scenario,
     int beacon_count,
@@ -1445,6 +1917,10 @@ TrialResult run_trial(
         scenario, beacon_count, trial, world, path, config, config.monte_carlo_noise, rng);
 }
 
+// See Simulation.hpp for the full contract: one shared RNG stream is
+// advanced across every (scenario, beacon_count, trial) combination in
+// nested-loop order, so results are reproducible for a fixed seed but
+// individual trials are not independently re-seeded.
 std::vector<TrialResult> run_monte_carlo(const SimulationConfig& config) {
     std::mt19937 rng(config.monte_carlo_seed);
     std::vector<TrialResult> trials;
@@ -1463,6 +1939,11 @@ std::vector<TrialResult> run_monte_carlo(const SimulationConfig& config) {
     return trials;
 }
 
+// See Simulation.hpp for the full contract. Implementation note: this
+// accumulates running sums (rather than storing per-trial values) so the
+// mean/RMSE/CI95 statistics below can all be derived in a single pass over
+// `trials`; yaw statistics are averaged only over the subset of trials that
+// report a valid (non-negative) beacon_yaw_rmse.
 SummaryRow summarize(int scenario, int beacon_count, const std::vector<TrialResult>& trials) {
     SummaryRow row;
     row.scenario = scenario;
@@ -1483,6 +1964,9 @@ SummaryRow summarize(int scenario, int beacon_count, const std::vector<TrialResu
     int count = 0;
     int yaw_count = 0;
 
+    // Filter to the requested (scenario, beacon_count) pair and accumulate
+    // running sums (including squared/4th-power sums needed for the CI95
+    // computations below).
     for (const auto& trial : trials) {
         if (trial.scenario != scenario || trial.beacons != beacon_count) {
             continue;
@@ -1532,6 +2016,32 @@ SummaryRow summarize(int scenario, int beacon_count, const std::vector<TrialResu
     return row;
 }
 
+/**
+ * @brief Factors the "run N trials, then reduce them via summarize()"
+ * pattern shared by every Monte Carlo sweep below (noise, geometry,
+ * trajectory, near-degenerate-trajectory, intermittent-measurement,
+ * outlier, and vehicle-pose-noise). `run_one_trial(trial)` is called for
+ * each trial index in [0, trial_count) and must return one TrialResult;
+ * callers close over whatever per-sweep state (world, path, noise, rng,
+ * measurement stress, ...) that call needs. This is a mechanical
+ * extraction of the repeated loop-and-reduce boilerplate, not a behavioral
+ * change: it preserves each sweep's exact original trial order and RNG
+ * draw sequence.
+ */
+template <typename TrialRunner>
+SummaryRow run_trials_and_summarize(
+    int scenario, int beacon_count, int trial_count, TrialRunner&& run_one_trial) {
+    std::vector<TrialResult> trials;
+    trials.reserve(static_cast<std::size_t>(trial_count));
+    for (int trial = 0; trial < trial_count; ++trial) {
+        trials.push_back(run_one_trial(trial));
+    }
+    return summarize(scenario, beacon_count, trials);
+}
+
+// See Simulation.hpp for the full contract. Each (range_sigma, bearing_sigma)
+// combination gets its own RNG, seeded deterministically from the noise
+// values themselves so the sweep is reproducible without a shared stream.
 std::vector<NoiseRobustnessRow> run_noise_robustness_sweep(const SimulationConfig& config) {
     const std::vector<double> range_sigmas{0.0, 0.01, 0.03, 0.06, 0.09};
     const std::vector<double> bearing_sigmas{0.0, 0.002, 0.006, 0.012, 0.018};
@@ -1552,13 +2062,9 @@ std::vector<NoiseRobustnessRow> run_noise_robustness_sweep(const SimulationConfi
 
             for (int scenario : config.monte_carlo_scenarios) {
                 for (int beacon_count : beacon_counts) {
-                    std::vector<TrialResult> trials;
-                    trials.reserve(static_cast<std::size_t>(config.monte_carlo_trials_per_case));
-                    for (int trial = 0; trial < config.monte_carlo_trials_per_case; ++trial) {
-                        trials.push_back(run_trial(scenario, beacon_count, trial, sweep_config, rng));
-                    }
-
-                    const SummaryRow summary = summarize(scenario, beacon_count, trials);
+                    const SummaryRow summary = run_trials_and_summarize(
+                        scenario, beacon_count, config.monte_carlo_trials_per_case,
+                        [&](int trial) { return run_trial(scenario, beacon_count, trial, sweep_config, rng); });
                     rows.push_back({
                         scenario,
                         beacon_count,
@@ -1580,22 +2086,26 @@ std::vector<NoiseRobustnessRow> run_noise_robustness_sweep(const SimulationConfi
     return rows;
 }
 
+// See Simulation.hpp for the full contract.
 std::vector<GeometrySweepRow> run_geometry_sweep(const SimulationConfig& config) {
     const std::vector<double> separations{0.3, 0.6, 1.0, 1.6, 2.4, 3.2, 4.0};
     const auto path = make_vehicle_path(config.monte_carlo_path_steps, "excited");
     std::vector<GeometrySweepRow> rows;
     rows.reserve(separations.size());
 
+    // Seed base for this sweep's RNG stream; offset from other sweeps'
+    // bases below purely to keep their streams decorrelated, not for any
+    // numerical significance.
+    constexpr unsigned int kGeometrySweepSeedBase = 2000U;
     for (std::size_t i = 0; i < separations.size(); ++i) {
         const World world = make_world_with_beacon_separation(separations[i]);
-        std::mt19937 rng(config.monte_carlo_seed + 2000U + static_cast<unsigned int>(i));
-        std::vector<TrialResult> trials;
-        trials.reserve(static_cast<std::size_t>(config.monte_carlo_trials_per_case));
-        for (int trial = 0; trial < config.monte_carlo_trials_per_case; ++trial) {
-            trials.push_back(run_trial_with_world_path(
-                1, 2, trial, world, path, config, config.monte_carlo_noise, rng));
-        }
-        const SummaryRow summary = summarize(1, 2, trials);
+        std::mt19937 rng(config.monte_carlo_seed + kGeometrySweepSeedBase + static_cast<unsigned int>(i));
+        const SummaryRow summary = run_trials_and_summarize(
+            1, 2, config.monte_carlo_trials_per_case,
+            [&](int trial) {
+                return run_trial_with_world_path(
+                    1, 2, trial, world, path, config, config.monte_carlo_noise, rng);
+            });
         rows.push_back({
             2,
             separations[i],
@@ -1612,6 +2122,7 @@ std::vector<GeometrySweepRow> run_geometry_sweep(const SimulationConfig& config)
     return rows;
 }
 
+// See Simulation.hpp for the full contract.
 std::vector<TrajectorySweepRow> run_trajectory_sweep(const SimulationConfig& config) {
     const std::vector<std::string> trajectories{
         "stationary", "line", "circle", "figure_eight", "excited"};
@@ -1619,21 +2130,25 @@ std::vector<TrajectorySweepRow> run_trajectory_sweep(const SimulationConfig& con
     std::vector<TrajectorySweepRow> rows;
     rows.reserve(trajectories.size());
 
+    constexpr unsigned int kTrajectorySweepRankSeedBase = 3000U;
+    constexpr unsigned int kTrajectorySweepTrialSeedBase = 4000U;
     for (std::size_t i = 0; i < trajectories.size(); ++i) {
         const auto path = make_vehicle_path(config.monte_carlo_path_steps, trajectories[i]);
-        std::mt19937 rank_rng(config.monte_carlo_seed + 3000U + static_cast<unsigned int>(i));
+        // Noiseless observability diagnostic at the ground-truth state,
+        // computed independently of (and before) the noisy Monte Carlo
+        // trials below, so rank/sigma_min reflect trajectory geometry alone.
+        std::mt19937 rank_rng(config.monte_carlo_seed + kTrajectorySweepRankSeedBase + static_cast<unsigned int>(i));
         const auto rank_measurements = generate_local_frame_measurements(world, path, Noise{0.0, 0.0}, rank_rng);
         const auto rank_and_sigma =
             local_observability_rank_and_sigma_min(true_state_scenario1(world), path, rank_measurements);
 
-        std::mt19937 rng(config.monte_carlo_seed + 4000U + static_cast<unsigned int>(i));
-        std::vector<TrialResult> trials;
-        trials.reserve(static_cast<std::size_t>(config.monte_carlo_trials_per_case));
-        for (int trial = 0; trial < config.monte_carlo_trials_per_case; ++trial) {
-            trials.push_back(run_trial_with_world_path(
-                1, 1, trial, world, path, config, config.monte_carlo_noise, rng));
-        }
-        const SummaryRow summary = summarize(1, 1, trials);
+        std::mt19937 rng(config.monte_carlo_seed + kTrajectorySweepTrialSeedBase + static_cast<unsigned int>(i));
+        const SummaryRow summary = run_trials_and_summarize(
+            1, 1, config.monte_carlo_trials_per_case,
+            [&](int trial) {
+                return run_trial_with_world_path(
+                    1, 1, trial, world, path, config, config.monte_carlo_noise, rng);
+            });
         rows.push_back({
             trajectories[i],
             1,
@@ -1652,6 +2167,7 @@ std::vector<TrajectorySweepRow> run_trajectory_sweep(const SimulationConfig& con
     return rows;
 }
 
+// See Simulation.hpp for the full contract.
 std::vector<InitialPoseRobustnessRow> run_initial_pose_robustness_sweep(const SimulationConfig& config) {
     const std::vector<Vec2> starts{
         config.initial_robot,
@@ -1664,10 +2180,11 @@ std::vector<InitialPoseRobustnessRow> run_initial_pose_robustness_sweep(const Si
 
     std::vector<InitialPoseRobustnessRow> rows;
     rows.reserve(starts.size());
+    constexpr unsigned int kInitialPoseRobustnessSeedBase = 500U;
     for (std::size_t i = 0; i < starts.size(); ++i) {
         SimulationConfig sweep_config = config;
         sweep_config.initial_robot = starts[i];
-        std::mt19937 rng(config.closed_loop_seed + 500U + static_cast<unsigned int>(i));
+        std::mt19937 rng(config.closed_loop_seed + kInitialPoseRobustnessSeedBase + static_cast<unsigned int>(i));
         const ClosedLoopResult result = run_closed_loop_comparison(1, sweep_config, rng);
         const ClosedLoopPoint& final_point = result.points.back();
         rows.push_back({
@@ -1684,6 +2201,7 @@ std::vector<InitialPoseRobustnessRow> run_initial_pose_robustness_sweep(const Si
     return rows;
 }
 
+// See Simulation.hpp for the full contract.
 std::vector<MinimalBeaconExcitationRow> run_minimal_beacon_excitation_study(
     const SimulationConfig& config) {
     const World world = make_world(1);
@@ -1697,7 +2215,11 @@ std::vector<MinimalBeaconExcitationRow> run_minimal_beacon_excitation_study(
     std::vector<MinimalBeaconExcitationRow> rows;
     rows.reserve(cases.size());
 
+    constexpr unsigned int kMinimalBeaconExcitationSeedBase = 700U;
     for (std::size_t case_index = 0; case_index < cases.size(); ++case_index) {
+        // Build each case's path from the same underlying full trajectory:
+        // a single fixed pose, two poses well separated in time (roughly a
+        // third of the trajectory apart), or the entire trajectory.
         const int poses = std::max(1, cases[case_index].second);
         std::vector<Vec2> path;
         path.reserve(static_cast<std::size_t>(poses));
@@ -1711,7 +2233,7 @@ std::vector<MinimalBeaconExcitationRow> run_minimal_beacon_excitation_study(
         }
 
         std::mt19937 measurement_rng(
-            config.monte_carlo_seed + 700U + static_cast<unsigned int>(case_index));
+            config.monte_carlo_seed + kMinimalBeaconExcitationSeedBase + static_cast<unsigned int>(case_index));
         const auto measurements = generate_local_frame_measurements(world, path, Noise{0.0, 0.0}, measurement_rng);
         const auto truth = true_state_scenario1(world);
         const auto metrics = local_observability_metrics(truth, path, measurements);
@@ -1757,6 +2279,11 @@ std::vector<MinimalBeaconExcitationRow> run_minimal_beacon_excitation_study(
     return rows;
 }
 
+// See Simulation.hpp for the full contract. Six hand-picked cases probe
+// increasingly poor seeds: nominal, then offset target seed at two
+// magnitudes, a poor beacon-radius guess, a poor yaw guess, and finally a
+// bad seed rescued by multistart (config.multistart_count starts instead
+// of 1).
 std::vector<PoorInitializationSweepRow> run_poor_initialization_sweep(
     const SimulationConfig& config) {
     const World world = make_world(1);
@@ -1773,12 +2300,17 @@ std::vector<PoorInitializationSweepRow> run_poor_initialization_sweep(
 
     std::vector<PoorInitializationSweepRow> rows;
     rows.reserve(cases.size());
+    constexpr unsigned int kPoorInitializationSweepSeedBase = 9000U;
     for (std::size_t case_index = 0; case_index < cases.size(); ++case_index) {
         const auto& [name, target_offset, beacon_radius, yaw_seed, multistarts] = cases[case_index];
-        std::mt19937 rng(config.monte_carlo_seed + 9000U + static_cast<unsigned int>(case_index));
+        std::mt19937 rng(
+            config.monte_carlo_seed + kPoorInitializationSweepSeedBase + static_cast<unsigned int>(case_index));
         std::vector<TrialResult> trials;
         trials.reserve(static_cast<std::size_t>(config.expanded_trials_per_case));
         for (int trial = 0; trial < config.expanded_trials_per_case; ++trial) {
+            // Rotate the offset target seed around the true target per
+            // trial, so the case's fixed offset magnitude is tested from
+            // many different directions rather than just one.
             const double angle = 2.0 * kPi * static_cast<double>(trial) /
                 static_cast<double>(std::max(1, config.expanded_trials_per_case));
             const Vec2 target_seed{
@@ -1820,6 +2352,7 @@ std::vector<PoorInitializationSweepRow> run_poor_initialization_sweep(
     return rows;
 }
 
+// See Simulation.hpp for the full contract.
 std::vector<TrajectorySweepRow> run_near_degenerate_trajectory_sweep(
     const SimulationConfig& config) {
     const std::vector<std::string> trajectories{
@@ -1835,20 +2368,23 @@ std::vector<TrajectorySweepRow> run_near_degenerate_trajectory_sweep(
     std::vector<TrajectorySweepRow> rows;
     rows.reserve(trajectories.size());
 
+    constexpr unsigned int kNearDegenerateTrajectorySweepRankSeedBase = 10000U;
+    constexpr unsigned int kNearDegenerateTrajectorySweepTrialSeedBase = 11000U;
     for (std::size_t i = 0; i < trajectories.size(); ++i) {
         const auto path = make_vehicle_path(config.monte_carlo_path_steps, trajectories[i]);
-        std::mt19937 rank_rng(config.monte_carlo_seed + 10000U + static_cast<unsigned int>(i));
+        std::mt19937 rank_rng(
+            config.monte_carlo_seed + kNearDegenerateTrajectorySweepRankSeedBase + static_cast<unsigned int>(i));
         const auto rank_measurements = generate_local_frame_measurements(world, path, Noise{0.0, 0.0}, rank_rng);
         const auto metrics = local_observability_metrics(true_state_scenario1(world), path, rank_measurements);
 
-        std::mt19937 rng(config.monte_carlo_seed + 11000U + static_cast<unsigned int>(i));
-        std::vector<TrialResult> trials;
-        trials.reserve(static_cast<std::size_t>(config.expanded_trials_per_case));
-        for (int trial = 0; trial < config.expanded_trials_per_case; ++trial) {
-            trials.push_back(run_trial_with_world_path(
-                1, 1, trial, world, path, config, config.monte_carlo_noise, rng));
-        }
-        const auto summary = summarize(1, 1, trials);
+        std::mt19937 rng(
+            config.monte_carlo_seed + kNearDegenerateTrajectorySweepTrialSeedBase + static_cast<unsigned int>(i));
+        const auto summary = run_trials_and_summarize(
+            1, 1, config.expanded_trials_per_case,
+            [&](int trial) {
+                return run_trial_with_world_path(
+                    1, 1, trial, world, path, config, config.monte_carlo_noise, rng);
+            });
         rows.push_back({
             trajectories[i],
             1,
@@ -1866,6 +2402,7 @@ std::vector<TrajectorySweepRow> run_near_degenerate_trajectory_sweep(
     return rows;
 }
 
+// See Simulation.hpp for the full contract.
 std::vector<IntermittentMeasurementSweepRow> run_intermittent_measurement_sweep(
     const SimulationConfig& config) {
     const World world = make_world(1);
@@ -1880,27 +2417,28 @@ std::vector<IntermittentMeasurementSweepRow> run_intermittent_measurement_sweep(
 
     std::vector<IntermittentMeasurementSweepRow> rows;
     rows.reserve(dropouts.size());
+    constexpr unsigned int kIntermittentMeasurementSweepSeedBase = 12000U;
     for (std::size_t i = 0; i < dropouts.size(); ++i) {
         MeasurementStress stress;
         stress.dropout_probability = dropouts[i];
-        std::mt19937 rng(config.monte_carlo_seed + 12000U + static_cast<unsigned int>(i));
-        std::vector<TrialResult> trials;
+        std::mt19937 rng(
+            config.monte_carlo_seed + kIntermittentMeasurementSweepSeedBase + static_cast<unsigned int>(i));
         double measurement_count = 0.0;
-        trials.reserve(static_cast<std::size_t>(config.expanded_trials_per_case));
-        for (int trial = 0; trial < config.expanded_trials_per_case; ++trial) {
-            const auto measurements = generate_stressed_local_measurements(
-                world, path, config.monte_carlo_noise, stress, rng);
-            measurement_count += static_cast<double>(measurements.size());
-            const auto initial_state = initial_state_scenario1(
-                1,
-                config.initial_target_estimate,
-                config.initial_beacon_guess_radius,
-                config.initial_beacon_guess_yaw);
-            trials.push_back(run_local_batch_trial_with_measurements(
-                trial, 1, world, path, measurements, config, config.monte_carlo_noise,
-                initial_state, false, 0.0));
-        }
-        const auto summary = summarize(1, 1, trials);
+        const auto summary = run_trials_and_summarize(
+            1, 1, config.expanded_trials_per_case,
+            [&](int trial) {
+                const auto measurements = generate_stressed_local_measurements(
+                    world, path, config.monte_carlo_noise, stress, rng);
+                measurement_count += static_cast<double>(measurements.size());
+                const auto initial_state = initial_state_scenario1(
+                    1,
+                    config.initial_target_estimate,
+                    config.initial_beacon_guess_radius,
+                    config.initial_beacon_guess_yaw);
+                return run_local_batch_trial_with_measurements(
+                    trial, 1, world, path, measurements, config, config.monte_carlo_noise,
+                    initial_state, false, 0.0);
+            });
         rows.push_back({
             dropouts[i],
             measurement_count / static_cast<double>(std::max(1, config.expanded_trials_per_case)),
@@ -1916,6 +2454,7 @@ std::vector<IntermittentMeasurementSweepRow> run_intermittent_measurement_sweep(
     return rows;
 }
 
+// See Simulation.hpp for the full contract.
 std::vector<OutlierRobustnessSweepRow> run_outlier_robustness_sweep(
     const SimulationConfig& config) {
     const World world = make_world(1);
@@ -1924,17 +2463,27 @@ std::vector<OutlierRobustnessSweepRow> run_outlier_robustness_sweep(
     std::vector<OutlierRobustnessSweepRow> rows;
     rows.reserve(probabilities.size() * 2U);
 
+    // Not routed through run_trials_and_summarize() above: each trial here
+    // draws one set of stressed measurements and evaluates it under *two*
+    // estimators (vanilla and Huber-robust), so the loop produces two
+    // TrialResult vectors per iteration rather than the "one draw, one
+    // result" shape that helper assumes.
+    constexpr unsigned int kOutlierRobustnessSweepSeedBase = 13000U;
     for (std::size_t i = 0; i < probabilities.size(); ++i) {
         MeasurementStress stress;
         stress.outlier_probability = probabilities[i];
         stress.outlier_range_magnitude = config.outlier_range_magnitude;
         stress.outlier_bearing_magnitude = config.outlier_bearing_magnitude;
-        std::mt19937 rng(config.monte_carlo_seed + 13000U + static_cast<unsigned int>(i));
+        std::mt19937 rng(config.monte_carlo_seed + kOutlierRobustnessSweepSeedBase + static_cast<unsigned int>(i));
         std::vector<TrialResult> vanilla_trials;
         std::vector<TrialResult> robust_trials;
         vanilla_trials.reserve(static_cast<std::size_t>(config.expanded_trials_per_case));
         robust_trials.reserve(static_cast<std::size_t>(config.expanded_trials_per_case));
 
+        // Draw one set of stressed measurements per trial, then solve it
+        // with both the vanilla (quadratic-loss) and Huber-robust
+        // estimators, so the two rows at each probability level are
+        // directly comparable (same outlier draws, only the loss differs).
         for (int trial = 0; trial < config.expanded_trials_per_case; ++trial) {
             const auto measurements = generate_stressed_local_measurements(
                 world, path, config.monte_carlo_noise, stress, rng);
@@ -1983,6 +2532,9 @@ std::vector<OutlierRobustnessSweepRow> run_outlier_robustness_sweep(
     return rows;
 }
 
+// See Simulation.hpp for the full contract. Runs two separate sub-sweeps:
+// an iid-noise sweep over `sigmas` (this loop), followed by a single
+// random-walk-drift case (the block below it).
 std::vector<VehicleLocalizationNoiseSweepRow> run_vehicle_localization_noise_sweep(
     const SimulationConfig& config) {
     const World world = make_world(1);
@@ -1998,28 +2550,34 @@ std::vector<VehicleLocalizationNoiseSweepRow> run_vehicle_localization_noise_swe
 
     std::vector<VehicleLocalizationNoiseSweepRow> rows;
     rows.reserve(sigmas.size() + 1U);
+    constexpr unsigned int kVehicleLocalizationNoiseSweepSeedBase = 14000U;
+    constexpr unsigned int kVehicleLocalizationDriftSeedBase = 14500U;
     for (std::size_t i = 0; i < sigmas.size(); ++i) {
-        std::mt19937 rng(config.monte_carlo_seed + 14000U + static_cast<unsigned int>(i));
-        std::vector<TrialResult> trials;
-        trials.reserve(static_cast<std::size_t>(config.expanded_trials_per_case));
-        for (int trial = 0; trial < config.expanded_trials_per_case; ++trial) {
-            const auto estimator_path = make_noisy_path(true_path, sigmas[i], rng);
-            trials.push_back(run_local_batch_trial_with_seed(
-                trial,
-                1,
-                world,
-                true_path,
-                estimator_path,
-                config,
-                config.monte_carlo_noise,
-                stress,
-                config.initial_target_estimate,
-                config.initial_beacon_guess_radius,
-                config.initial_beacon_guess_yaw,
-                false,
-                rng));
-        }
-        const auto summary = summarize(1, 1, trials);
+        std::mt19937 rng(
+            config.monte_carlo_seed + kVehicleLocalizationNoiseSweepSeedBase + static_cast<unsigned int>(i));
+        const auto summary = run_trials_and_summarize(
+            1, 1, config.expanded_trials_per_case,
+            [&](int trial) {
+                // Measurements are generated from the true path, but the
+                // estimator only sees a noisy version of it
+                // (make_noisy_path), modeling imperfect vehicle
+                // self-localization.
+                const auto estimator_path = make_noisy_path(true_path, sigmas[i], rng);
+                return run_local_batch_trial_with_seed(
+                    trial,
+                    1,
+                    world,
+                    true_path,
+                    estimator_path,
+                    config,
+                    config.monte_carlo_noise,
+                    stress,
+                    config.initial_target_estimate,
+                    config.initial_beacon_guess_radius,
+                    config.initial_beacon_guess_yaw,
+                    false,
+                    rng);
+            });
         rows.push_back({
             "iid_position_noise",
             sigmas[i],
@@ -2032,29 +2590,30 @@ std::vector<VehicleLocalizationNoiseSweepRow> run_vehicle_localization_noise_swe
             summary.convergence_rate,
         });
     }
+    // Second sub-sweep: a single random-walk-drift case (accumulating
+    // dead-reckoning-style error, distinct from the iid noise above).
     {
         constexpr double drift_fraction = 0.005;
-        std::mt19937 rng(config.monte_carlo_seed + 14500U);
-        std::vector<TrialResult> trials;
-        trials.reserve(static_cast<std::size_t>(config.expanded_trials_per_case));
-        for (int trial = 0; trial < config.expanded_trials_per_case; ++trial) {
-            const auto estimator_path = make_drifted_path(true_path, drift_fraction, rng);
-            trials.push_back(run_local_batch_trial_with_seed(
-                trial,
-                1,
-                world,
-                true_path,
-                estimator_path,
-                config,
-                config.monte_carlo_noise,
-                stress,
-                config.initial_target_estimate,
-                config.initial_beacon_guess_radius,
-                config.initial_beacon_guess_yaw,
-                false,
-                rng));
-        }
-        const auto summary = summarize(1, 1, trials);
+        std::mt19937 rng(config.monte_carlo_seed + kVehicleLocalizationDriftSeedBase);
+        const auto summary = run_trials_and_summarize(
+            1, 1, config.expanded_trials_per_case,
+            [&](int trial) {
+                const auto estimator_path = make_drifted_path(true_path, drift_fraction, rng);
+                return run_local_batch_trial_with_seed(
+                    trial,
+                    1,
+                    world,
+                    true_path,
+                    estimator_path,
+                    config,
+                    config.monte_carlo_noise,
+                    stress,
+                    config.initial_target_estimate,
+                    config.initial_beacon_guess_radius,
+                    config.initial_beacon_guess_yaw,
+                    false,
+                    rng);
+            });
         rows.push_back({
             "random_walk_drift",
             drift_fraction,
@@ -2070,6 +2629,7 @@ std::vector<VehicleLocalizationNoiseSweepRow> run_vehicle_localization_noise_swe
     return rows;
 }
 
+// See Simulation.hpp for the full contract.
 std::vector<InformationConditioningRow> run_information_conditioning_sweep(
     const SimulationConfig& config) {
     const std::vector<std::string> trajectories{
@@ -2087,9 +2647,11 @@ std::vector<InformationConditioningRow> run_information_conditioning_sweep(
     const World world = make_world(1);
     std::vector<InformationConditioningRow> rows;
     rows.reserve(trajectories.size());
+    constexpr unsigned int kInformationConditioningSweepSeedBase = 15000U;
     for (std::size_t i = 0; i < trajectories.size(); ++i) {
         const auto path = make_vehicle_path(config.monte_carlo_path_steps, trajectories[i]);
-        std::mt19937 rng(config.monte_carlo_seed + 15000U + static_cast<unsigned int>(i));
+        std::mt19937 rng(
+            config.monte_carlo_seed + kInformationConditioningSweepSeedBase + static_cast<unsigned int>(i));
         const auto measurements = generate_local_frame_measurements(world, path, Noise{0.0, 0.0}, rng);
         const auto metrics = local_observability_metrics(true_state_scenario1(world), path, measurements);
         rows.push_back({
@@ -2107,6 +2669,14 @@ std::vector<InformationConditioningRow> run_information_conditioning_sweep(
     return rows;
 }
 
+// See Simulation.hpp for the full contract. `estimator` is a string tag
+// dispatched via a chain of comparisons below to the appropriate helper:
+// EKF variants delegate straight to run_trial_with_world_path (scenario 3
+// or 4); every other tag draws one common set of (unstressed) measurements
+// and then routes to run_local_batch_trial_with_measurements() or
+// run_multistart_local_batch_trial() with estimator-specific arguments
+// (robust reweighting, a trailing sliding window, multistart, or a single
+// target packet per beacon).
 std::vector<ExpandedBaselineSummaryRow> run_expanded_baseline_comparison(
     const SimulationConfig& config) {
     const World world = make_world(1);
@@ -2124,12 +2694,15 @@ std::vector<ExpandedBaselineSummaryRow> run_expanded_baseline_comparison(
     };
     rows.reserve(estimators.size());
 
+    constexpr unsigned int kExpandedBaselineComparisonSeedBase = 16000U;
     for (const auto& estimator : estimators) {
-        std::mt19937 rng(config.monte_carlo_seed + 16000U +
+        std::mt19937 rng(config.monte_carlo_seed + kExpandedBaselineComparisonSeedBase +
             static_cast<unsigned int>(rows.size() * 101U));
         std::vector<TrialResult> trials;
         trials.reserve(static_cast<std::size_t>(config.expanded_trials_per_case));
         for (int trial = 0; trial < config.expanded_trials_per_case; ++trial) {
+            // EKF variants bypass the batch-measurement path entirely and
+            // delegate straight to the EKF trial runner.
             if (estimator == "naive_ekf") {
                 trials.push_back(run_trial_with_world_path(
                     3, 1, trial, world, path, config, config.monte_carlo_noise, rng));
@@ -2141,6 +2714,9 @@ std::vector<ExpandedBaselineSummaryRow> run_expanded_baseline_comparison(
                 continue;
             }
 
+            // All remaining (batch Gauss-Newton) variants share one set of
+            // unstressed measurements and the generic circular seed, only
+            // differing in which solver options/helper they route to below.
             const auto measurements = generate_stressed_local_measurements(
                 world, path, config.monte_carlo_noise, no_stress, rng);
             const auto initial_state = initial_state_scenario1(

@@ -1,0 +1,4 @@
+# Python dependencies for scripts/*.py (figure/data-export helpers that run
+# against the C++ binary's CSV outputs). The C++ simulation itself has no
+# Python dependency; this file only covers scripts/.
+Pillow>=10.0

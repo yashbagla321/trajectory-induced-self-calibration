@@ -107,13 +107,26 @@ struct SimulationConfig {
     Noise adaptive_noise{0.0, 0.0};
 };
 
-// Loads a config file. Missing files are allowed and simply return defaults.
-// Unknown keys are ignored so local experiment notes do not break a run.
+/**
+ * Loads a config file. Missing files are allowed and simply return defaults.
+ * Unknown keys are ignored so local experiment notes do not break a run.
+ * @param path path to an INI-style `key = value` config file (see
+ *     config/simulation.ini for the canonical example).
+ * @return a SimulationConfig with any recognized keys applied on top of the
+ *     struct's default field values.
+ */
 SimulationConfig load_config(const std::filesystem::path& path);
 
-// Writes a fully commented default config file if it does not already exist.
+/**
+ * Writes a fully commented default config file if it does not already
+ * exist (a no-op if a file is already present at `path`), so that a fresh
+ * checkout gets an editable, self-documenting config/simulation.ini.
+ */
 void write_default_config_if_missing(const std::filesystem::path& path);
 
+/// Joins a list of integers into a single comma-separated string (e.g. for
+/// writing SimulationConfig::monte_carlo_beacon_counts /
+/// monte_carlo_scenarios back out to a config file).
 std::string join_ints(const std::vector<int>& values);
 
 }  // namespace adaptive

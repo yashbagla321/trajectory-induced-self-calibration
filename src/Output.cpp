@@ -1,3 +1,15 @@
+/**
+ * @file Output.cpp
+ * @brief Serialization of simulation results for offline inspection and plotting.
+ *
+ * This file implements every `write_*` entry point declared in Output.hpp: CSV writers for
+ * the various Monte Carlo sweep/summary row structs (see Types.hpp), CSV/SVG writers for
+ * closed-loop trajectories and adaptive-localization runs, and a single self-contained HTML
+ * viewer (embedding per-step JSON plus inline CSS/JS) that animates a run. The resulting
+ * files are consumed downstream by the paper's figures and by Python plotting scripts; no
+ * simulation logic lives here, only formatting.
+ */
+
 #include "adaptive_localization/Output.hpp"
 
 #include <algorithm>
@@ -13,6 +25,15 @@ namespace adaptive {
 
 namespace {
 
+/**
+ * @brief Fixed world-to-SVG-pixel affine transform used by write_svg_plot().
+ *
+ * Maps a hard-coded world-space window (x in [min_x, max_x], y in [min_y, max_y]) onto an
+ * SVG canvas of size width x height with a border of `margin` pixels on every side. The
+ * window is not auto-fit to the data; it is a fixed viewport chosen to frame the scenarios
+ * this file plots. sx()/sy() perform the linear mapping; sy() additionally flips the y axis
+ * because SVG y grows downward while world y grows upward.
+ */
 struct SvgTransform {
     double min_x = -4.0;
     double max_x = 4.0;
@@ -26,6 +47,16 @@ struct SvgTransform {
     double sy(double y) const { return height - margin - (y - min_y) / (max_y - min_y) * (height - 2.0 * margin); }
 };
 
+/**
+ * @brief Write a metric to a CSV stream, leaving the field blank if it is a "not applicable" sentinel.
+ *
+ * Several row structs (see Types.hpp) use a negative value (typically -1.0) for
+ * beacon_yaw_rmse-style fields to mean "beacon yaw was not estimated/not applicable for this
+ * scenario or estimator" (e.g. the calibrated baseline in scenario 2 does not estimate beacon
+ * yaw at all). This helper centralizes that convention for CSV output: negative values are
+ * skipped entirely (the CSV cell is left empty between the surrounding commas), non-negative
+ * values are streamed normally.
+ */
 void write_optional_metric(std::ostream& out, double value) {
     if (value < 0.0) {
         return;
@@ -33,6 +64,14 @@ void write_optional_metric(std::ostream& out, double value) {
     out << value;
 }
 
+/**
+ * @brief JSON counterpart of write_optional_metric(): emits the literal `null` for negative
+ * (not-applicable) sentinel values instead of leaving the field blank, since JSON has no
+ * concept of an omitted scalar in this inline-array-building style. Non-negative values are
+ * streamed normally. Used when embedding ClosedLoopResult data into the HTML viewer's JS
+ * `DATA` array, where the front-end code checks for `null` (see `fmtMaybe` in
+ * write_html_viewer()).
+ */
 void write_json_optional_metric(std::ostream& out, double value) {
     if (value < 0.0) {
         out << "null";
@@ -41,6 +80,17 @@ void write_json_optional_metric(std::ostream& out, double value) {
     out << value;
 }
 
+/**
+ * @brief Serialize a ClosedLoopResult to a single JSON object literal on `out`.
+ *
+ * Emits, in order: `scenario` (int), `target` ({x,y}), `beacons` (array of {x,y,yaw} in
+ * world.beacons/world.beacon_yaws order), and `points` (one object per ClosedLoopPoint with
+ * step, robot, targetEstimate, targetError, goalError, beaconPositionRmse, beaconYawRmse
+ * (null when not applicable, via write_json_optional_metric), cost, and the per-step
+ * beaconEstimates array of {x,y,yaw}). This is not a standalone file format: it produces a
+ * bare JSON value with no trailing newline, intended to be embedded directly inside a
+ * JavaScript array literal by write_html_viewer(). No whitespace/pretty-printing is added.
+ */
 void write_closed_loop_json(std::ostream& out, const ClosedLoopResult& result) {
     out << "{";
     out << "\"scenario\":" << result.scenario << ",";
@@ -78,6 +128,17 @@ void write_closed_loop_json(std::ostream& out, const ClosedLoopResult& result) {
     out << "]}";
 }
 
+/**
+ * @brief Serialize an AdaptiveLocalizationRun to a single JSON object literal on `out`.
+ *
+ * Same shape and purpose as write_closed_loop_json(), for the adaptive-localization run that
+ * is displayed as the 4th scenario in the HTML viewer. `scenario` is hard-coded to 3 (the
+ * viewer's scenario index for "adaptive law + target-seeking controller"), since
+ * AdaptiveLocalizationRun itself carries no scenario id. AdaptiveLocalizationPoint has no
+ * beacon_position_rmse/beacon_yaw_rmse/retriggered fields, so unlike write_closed_loop_json()
+ * this only emits step, robot, targetEstimate, targetError, goalError, cost, and
+ * beaconEstimates per point.
+ */
 void write_adaptive_localization_json(std::ostream& out, const AdaptiveLocalizationRun& result) {
     out << "{";
     out << "\"scenario\":3,";
@@ -113,6 +174,17 @@ void write_adaptive_localization_json(std::ostream& out, const AdaptiveLocalizat
 
 }  // namespace
 
+/**
+ * @brief Write per-(scenario, beacon-count) aggregate accuracy statistics to CSV.
+ *
+ * One row per SummaryRow: scenario id, beacon count, target-position RMSE and its 95% CI,
+ * mean signed error and its 95% CI, per-axis bias (bias_x, bias_y), convergence rate (written
+ * under the CSV header `success_rate`), mean solver cost/iterations/runtime, and mean beacon
+ * position RMSE (with CI). The trailing mean_beacon_yaw_rmse / mean_beacon_yaw_rmse_ci95
+ * columns use write_optional_metric() so rows where beacon yaw is not estimated (sentinel
+ * -1.0, see Types.hpp) are written as empty CSV cells rather than -1. Values use fixed
+ * notation at 8 decimal places; the header row is written first.
+ */
 void write_summary_csv(const std::filesystem::path& path, const std::vector<SummaryRow>& rows) {
     std::ofstream out(path);
     out << "scenario,beacons,rmse,rmse_ci95,mean_error,mean_error_ci95,bias_x,bias_y,"
@@ -133,6 +205,17 @@ void write_summary_csv(const std::filesystem::path& path, const std::vector<Summ
     }
 }
 
+/**
+ * @brief Write one row per individual Monte Carlo trial to CSV.
+ *
+ * One row per TrialResult: scenario, beacon count, trial index, true target position
+ * (target_x/target_y, from `truth`), estimated target position (estimate_x/estimate_y),
+ * target error, beacon position RMSE, beacon yaw RMSE (blank via write_optional_metric() when
+ * the -1.0 "not applicable" sentinel is set), solver cost, iterations, runtime in ms, and two
+ * boolean flags emitted as 0/1: solver_converged (raw solver convergence flag) and `success`
+ * (CSV header name for TrialResult::converged, the trial-level success criterion). Fixed
+ * notation, 8 decimal places.
+ */
 void write_trial_csv(const std::filesystem::path& path, const std::vector<TrialResult>& trials) {
     std::ofstream out(path);
     out << "scenario,beacons,trial,target_x,target_y,estimate_x,estimate_y,error,"
@@ -148,6 +231,15 @@ void write_trial_csv(const std::filesystem::path& path, const std::vector<TrialR
     }
 }
 
+/**
+ * @brief Write the noise-robustness sweep (target/beacon accuracy vs. measurement noise) to CSV.
+ *
+ * One row per NoiseRobustnessRow: scenario, beacon count, the range and bearing noise sigmas
+ * used for that trial batch, target RMSE, beacon position RMSE, beacon yaw RMSE (blank via
+ * write_optional_metric() when not applicable), mean cost/iterations/runtime, and convergence
+ * rate (CSV header `success_rate`). This CSV is also the data source consumed by
+ * write_noise_robustness_svg() to plot target RMSE vs. range sigma.
+ */
 void write_noise_robustness_csv(const std::filesystem::path& path, const std::vector<NoiseRobustnessRow>& rows) {
     std::ofstream out(path);
     out << "scenario,beacons,range_sigma,bearing_sigma,target_rmse,beacon_position_rmse,"
@@ -163,6 +255,15 @@ void write_noise_robustness_csv(const std::filesystem::path& path, const std::ve
     }
 }
 
+/**
+ * @brief Write the beacon-geometry sweep (accuracy vs. beacon separation) to CSV.
+ *
+ * One row per GeometrySweepRow: beacon count, beacon separation distance, target RMSE, beacon
+ * position RMSE, beacon yaw RMSE, mean cost/iterations/runtime, and convergence rate (CSV
+ * header `success_rate`). Unlike several other sweep rows, GeometrySweepRow::beacon_yaw_rmse
+ * has no -1.0 sentinel convention here, so it is written directly with `<<` rather than via
+ * write_optional_metric().
+ */
 void write_geometry_sweep_csv(const std::filesystem::path& path, const std::vector<GeometrySweepRow>& rows) {
     std::ofstream out(path);
     out << "beacons,beacon_separation,target_rmse,beacon_position_rmse,beacon_yaw_rmse,"
@@ -177,6 +278,14 @@ void write_geometry_sweep_csv(const std::filesystem::path& path, const std::vect
     }
 }
 
+/**
+ * @brief Write the vehicle-trajectory sweep (accuracy/observability vs. trajectory shape) to CSV.
+ *
+ * One row per TrajectorySweepRow: trajectory name/label, beacon count, observability rank and
+ * smallest singular value of the observability/information matrix, target RMSE, beacon
+ * position RMSE, beacon yaw RMSE, mean cost/iterations/runtime, and convergence rate (CSV
+ * header `success_rate`).
+ */
 void write_trajectory_sweep_csv(const std::filesystem::path& path, const std::vector<TrajectorySweepRow>& rows) {
     std::ofstream out(path);
     out << "trajectory,beacons,observability_rank,smallest_singular_value,target_rmse,"
@@ -191,6 +300,14 @@ void write_trajectory_sweep_csv(const std::filesystem::path& path, const std::ve
     }
 }
 
+/**
+ * @brief Write the initial-robot-pose robustness sweep to CSV.
+ *
+ * One row per InitialPoseRobustnessRow: scenario, trial index, the robot's initial position
+ * (initial_robot_x/y), and final-step accuracy metrics: goal error, target error, beacon
+ * position RMSE, and beacon yaw RMSE (blank via write_optional_metric() when the -1.0
+ * sentinel indicates yaw is not estimated for that scenario).
+ */
 void write_initial_pose_robustness_csv(
     const std::filesystem::path& path,
     const std::vector<InitialPoseRobustnessRow>& rows) {
@@ -208,6 +325,18 @@ void write_initial_pose_robustness_csv(
     }
 }
 
+/**
+ * @brief Write the minimal-beacon-excitation case study results to CSV.
+ *
+ * One row per MinimalBeaconExcitationRow: case name (CSV header `case`), beacon count, pose
+ * count, observability rank, smallest singular value, target error, trajectory spread,
+ * beacon position error, beacon yaw error, solver cost/iterations, and converged flag emitted
+ * as 0/1 under the CSV header `solver_converged`. Note the CSV column order
+ * (..., target_error, trajectory_spread, beacon_position_error, ...) differs slightly from
+ * the struct's declaration order in Types.hpp (trajectory_spread is declared before
+ * smallest_singular_value there); this writer's own header row is the authoritative column
+ * order for the emitted file.
+ */
 void write_minimal_beacon_excitation_csv(
     const std::filesystem::path& path,
     const std::vector<MinimalBeaconExcitationRow>& rows) {
@@ -224,6 +353,14 @@ void write_minimal_beacon_excitation_csv(
     }
 }
 
+/**
+ * @brief Write the poor-initialization / multistart robustness sweep to CSV.
+ *
+ * One row per PoorInitializationSweepRow: case name (CSV header `case`), the seed
+ * perturbation parameters (target_seed_offset, beacon_seed_radius, beacon_yaw_seed), the
+ * multistart count, target RMSE, beacon position RMSE, beacon yaw RMSE, mean
+ * cost/iterations/runtime, and convergence rate (CSV header `success_rate`).
+ */
 void write_poor_initialization_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<PoorInitializationSweepRow>& rows) {
@@ -242,6 +379,13 @@ void write_poor_initialization_sweep_csv(
     }
 }
 
+/**
+ * @brief Write the intermittent-measurement (dropout) robustness sweep to CSV.
+ *
+ * One row per IntermittentMeasurementSweepRow: dropout probability, the resulting mean
+ * number of measurements actually received, target RMSE, beacon position RMSE, beacon yaw
+ * RMSE, mean cost/iterations/runtime, and convergence rate (CSV header `success_rate`).
+ */
 void write_intermittent_measurement_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<IntermittentMeasurementSweepRow>& rows) {
@@ -258,6 +402,14 @@ void write_intermittent_measurement_sweep_csv(
     }
 }
 
+/**
+ * @brief Write the outlier-measurement robustness sweep to CSV.
+ *
+ * One row per OutlierRobustnessSweepRow: estimator name, outlier occurrence probability, the
+ * outlier magnitude injected into range and bearing measurements, target RMSE, beacon
+ * position RMSE, beacon yaw RMSE, mean cost/iterations/runtime, and convergence rate (CSV
+ * header `success_rate`). Used to compare robust vs. non-robust estimators under outliers.
+ */
 void write_outlier_robustness_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<OutlierRobustnessSweepRow>& rows) {
@@ -276,6 +428,15 @@ void write_outlier_robustness_sweep_csv(
     }
 }
 
+/**
+ * @brief Write the vehicle self-localization noise sweep to CSV.
+ *
+ * One row per VehicleLocalizationNoiseSweepRow: case name (CSV header `case`), the injected
+ * vehicle position noise sigma, target RMSE, beacon position RMSE, beacon yaw RMSE, mean
+ * cost/iterations/runtime, and convergence rate (CSV header `success_rate`). This models the
+ * effect of imperfect vehicle self-localization (as opposed to range/bearing measurement
+ * noise) on target/beacon estimation accuracy.
+ */
 void write_vehicle_localization_noise_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<VehicleLocalizationNoiseSweepRow>& rows) {
@@ -291,6 +452,18 @@ void write_vehicle_localization_noise_sweep_csv(
     }
 }
 
+/**
+ * @brief Write the Fisher-information/observability conditioning study to CSV.
+ *
+ * One row per InformationConditioningRow: trajectory name, beacon count, observation count,
+ * observability rank, smallest and largest singular values of the information matrix,
+ * trajectory spread, condition number, and log-determinant of the information matrix. Note
+ * the CSV column order places trajectory_spread after largest/smallest singular values
+ * (`...,smallest_singular_value,trajectory_spread,largest_singular_value,...`), which differs
+ * from the struct's declaration order in Types.hpp; the header row below is authoritative for
+ * the emitted file. No convergence/cost columns are included, since this row characterizes
+ * problem conditioning rather than solver outcomes.
+ */
 void write_information_conditioning_csv(
     const std::filesystem::path& path,
     const std::vector<InformationConditioningRow>& rows) {
@@ -307,6 +480,15 @@ void write_information_conditioning_csv(
     }
 }
 
+/**
+ * @brief Write the expanded baseline-comparison summary (multiple estimators/cases) to CSV.
+ *
+ * One row per ExpandedBaselineSummaryRow: case name, estimator name, beacon count, target
+ * RMSE and its 95% CI, beacon position RMSE and its 95% CI, beacon yaw RMSE and its 95% CI,
+ * mean cost/iterations/runtime, and convergence rate (CSV header `success_rate`). Unlike
+ * SummaryRow, this struct's beacon_yaw_rmse/CI fields have no -1.0 sentinel here, so they are
+ * written directly rather than via write_optional_metric().
+ */
 void write_expanded_baseline_summary_csv(
     const std::filesystem::path& path,
     const std::vector<ExpandedBaselineSummaryRow>& rows) {
@@ -326,6 +508,15 @@ void write_expanded_baseline_summary_csv(
     }
 }
 
+/**
+ * @brief Write the active-excitation strategy comparison to CSV.
+ *
+ * One row per ActiveExcitationComparisonRow: excitation strategy name, beacon count, and
+ * final-step accuracy metrics: goal error, target error, beacon position RMSE, beacon yaw
+ * RMSE, and cost. Column headers carry explicit units (`_m` for the distance-based error
+ * metrics, `_rad` for the yaw RMSE) since this row has no -1.0 "not applicable" sentinel
+ * convention and all fields are always meaningful.
+ */
 void write_active_excitation_comparison_csv(
     const std::filesystem::path& path,
     const std::vector<ActiveExcitationComparisonRow>& rows) {
@@ -341,6 +532,16 @@ void write_active_excitation_comparison_csv(
     }
 }
 
+/**
+ * @brief Write the supervised-excitation strategy comparison to CSV.
+ *
+ * One row per SupervisedExcitationComparisonRow: excitation strategy name, how many times the
+ * supervisor retriggered active excitation, how many steps it took to first cross the goal-
+ * and target-error thresholds (-1 if the threshold was never reached, written as-is, not via
+ * write_optional_metric()), and final-step accuracy metrics (goal error, target error, beacon
+ * position RMSE, beacon yaw RMSE, cost), with `_m`/`_rad` unit suffixes on the distance/angle
+ * columns as in write_active_excitation_comparison_csv().
+ */
 void write_supervised_excitation_comparison_csv(
     const std::filesystem::path& path,
     const std::vector<SupervisedExcitationComparisonRow>& rows) {
@@ -358,6 +559,15 @@ void write_supervised_excitation_comparison_csv(
     }
 }
 
+/**
+ * @brief Write the supervised-retriggering lambda (sensitivity threshold) sweep to CSV.
+ *
+ * One row per SupervisedLambdaSweepRow: the lambda threshold value, how many times the
+ * supervised controller retriggered at that lambda, and final-error metrics for both a fixed
+ * (non-retriggering) baseline and the supervised controller side by side: target error,
+ * beacon position RMSE, and beacon yaw RMSE for each, with `_m`/`_rad` unit suffixes. This
+ * lets the two conditions be compared directly at each lambda value.
+ */
 void write_supervised_lambda_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<SupervisedLambdaSweepRow>& rows) {
@@ -379,6 +589,16 @@ void write_supervised_lambda_sweep_csv(
     }
 }
 
+/**
+ * @brief Write a small illustrative example trajectory/world CSV for documentation purposes.
+ *
+ * Builds a fixed 2-beacon world (make_world(2)) and an 80-step vehicle path
+ * (make_vehicle_path(80)), then writes "example_trajectory.csv" into `output_dir` with one
+ * row per time step: time index, vehicle position (y_x, y_y), the (constant, repeated every
+ * row) target position, and the two beacons' (constant, repeated every row) positions. This
+ * is a standalone illustrative dataset, not derived from any solver run; it exists to give
+ * downstream tooling/docs a minimal concrete example of the trajectory/world geometry.
+ */
 void write_example_csvs(const std::filesystem::path& output_dir) {
     const World world = make_world(2);
     const auto path = make_vehicle_path(80);
@@ -392,6 +612,16 @@ void write_example_csvs(const std::filesystem::path& output_dir) {
     }
 }
 
+/**
+ * @brief Write the per-step time history of a closed-loop run to CSV.
+ *
+ * One row per ClosedLoopPoint in result.points, in step order: step index, robot position,
+ * target-estimate position, target error, goal error, beacon position RMSE, beacon yaw RMSE
+ * (blank via write_optional_metric() when the -1.0 sentinel indicates yaw is not estimated,
+ * e.g. for the calibrated baseline scenario), least-squares cost, and whether active
+ * excitation was retriggered at that step (0/1). This is the CSV counterpart of the per-run
+ * time series also embedded as JSON by write_closed_loop_json() for the HTML viewer.
+ */
 void write_closed_loop_csv(const std::filesystem::path& path, const ClosedLoopResult& result) {
     std::ofstream out(path);
     out << "step,robot_x,robot_y,target_estimate_x,target_estimate_y,target_error,goal_error,"
@@ -407,6 +637,19 @@ void write_closed_loop_csv(const std::filesystem::path& path, const ClosedLoopRe
     }
 }
 
+/**
+ * @brief Write final per-beacon estimate accuracy plus true final measurement geometry to CSV.
+ *
+ * One row per beacon in result.world.beacons: scenario id, beacon index, true beacon position
+ * and yaw, final estimated beacon position and yaw (from result.beacon_estimates, i.e. the
+ * converged/final estimate, not the per-step history), and four derived ground-truth
+ * measurement-geometry quantities computed from the *true* (not estimated) beacon, robot, and
+ * target positions: final_vehicle_range/bearing (range and bearing from the true beacon to
+ * the robot's final position, `result.points.back().robot`) and final_target_range/bearing
+ * (range and bearing from the true beacon to the true target). These last four columns
+ * describe the actual sensing geometry at the end of the run, independent of estimation
+ * error, and are useful for checking observability/geometry rather than accuracy.
+ */
 void write_beacon_estimate_csv(const std::filesystem::path& path, const ClosedLoopResult& result) {
     std::ofstream out(path);
     out << "scenario,beacon,true_x,true_y,estimate_x,estimate_y,true_yaw,estimate_yaw,"
@@ -424,6 +667,22 @@ void write_beacon_estimate_csv(const std::filesystem::path& path, const ClosedLo
     }
 }
 
+/**
+ * @brief Render a static top-down SVG plot of one closed-loop run's full spatial geometry.
+ *
+ * Draws, on the fixed SvgTransform world window: the robot trajectory q(t) as a polyline with
+ * markers at the start (q(0)) and end; the evolving target-estimate trace p_hat(t) as a
+ * sequence of green dots whose opacity ramps from ~0.30 to ~0.90 over the run (earlier
+ * estimates are more transparent, so the most recent estimate stands out); the true target p
+ * as a red crosshair and the final target estimate as a green ring; each true beacon as an
+ * orange square with an "x_i" label; each beacon's per-step estimate history as a small dot
+ * trail in a per-beacon color (cycled through `beacon_colors` via `i % 6`, matching the color
+ * cycle also used in the HTML viewer's JS `beaconColors`); and each beacon's final estimate as
+ * an "x" mark ("xhat_i"). The title switches between "Local-frame model" (scenario 1) and
+ * "Calibrated baseline" (any other scenario, i.e. scenario 2). All world coordinates are
+ * mapped to pixel space via SvgTransform::sx()/sy(). Coordinate values in the SVG use fixed
+ * notation at 3 decimal places.
+ */
 void write_svg_plot(const std::filesystem::path& path, const ClosedLoopResult& result) {
     SvgTransform t;
     const char* beacon_colors[] = {"#7c3aed", "#0891b2", "#db2777", "#65a30d", "#ea580c", "#4f46e5"};
@@ -464,6 +723,8 @@ void write_svg_plot(const std::filesystem::path& path, const ClosedLoopResult& r
         << "\" r=\"7\" fill=\"#2563eb\" stroke=\"#ffffff\" stroke-width=\"2\"/>\n";
     for (std::size_t k = 0; k < result.points.size(); ++k) {
         const Vec2 phat = result.points[k].target_estimate;
+        // Fade earlier target-estimate dots so the trail reads chronologically: opacity
+        // ramps linearly from 0.30 (k=0) to 0.90 (last point) as k advances.
         const double opacity = 0.30 + 0.60 * static_cast<double>(k) /
             static_cast<double>(std::max<std::size_t>(1, result.points.size() - 1));
         out << "<circle cx=\"" << t.sx(phat.x) << "\" cy=\"" << t.sy(phat.y)
@@ -495,10 +756,15 @@ void write_svg_plot(const std::filesystem::path& path, const ClosedLoopResult& r
         out << "<text x=\"" << t.sx(b.x) + 12 << "\" y=\"" << t.sy(b.y) + 24
             << "\" font-family=\"Arial\" font-size=\"24\" fill=\"#9a3412\">x_" << i << "</text>\n";
         for (std::size_t k = 0; k < result.points.size(); ++k) {
+            // Defensive bounds check: a beacon may not yet have an estimate recorded at an
+            // early step (e.g. before it enters observability), so skip rather than index
+            // out of range.
             if (i >= result.points[k].beacon_estimates.size()) {
                 continue;
             }
             const Vec2 history = result.points[k].beacon_estimates[i].position;
+            // Same fade-in-over-time treatment as the target-estimate trail above, but
+            // starting slightly more transparent (0.25 instead of 0.30).
             const double opacity = 0.25 + 0.60 * static_cast<double>(k) /
                 static_cast<double>(std::max<std::size_t>(1, result.points.size() - 1));
             out << "<circle cx=\"" << t.sx(history.x) << "\" cy=\"" << t.sy(history.y)
@@ -522,15 +788,32 @@ void write_svg_plot(const std::filesystem::path& path, const ClosedLoopResult& r
     out << "</svg>\n";
 }
 
+/**
+ * @brief Render an SVG line chart of vehicle-to-target error and target-estimate error vs. step.
+ *
+ * Plots ||q(t)-p|| (goal_error, blue) and ||p_hat(t)-p|| (target_error, green) as two
+ * polylines over the first 60 measurement steps (by point `step` value, not point count).
+ * The y axis is auto-scaled to the data: `max_error` is the largest goal/target error seen in
+ * the plotted window (with a floor of 0.01 to avoid a degenerate/zero-height axis), and the
+ * x axis is a simple linear index-to-pixel mapping over the plotted points, with gridlines/
+ * axis labels drawn at 4 evenly spaced y-ticks and 10 evenly spaced x-ticks (labeled with the
+ * underlying `step` value, since step and array index can differ once retriggering/dropped
+ * points are involved). SVG values use fixed notation at 3 decimal places.
+ */
 void write_error_curve_svg(const std::filesystem::path& path, const ClosedLoopResult& result) {
     const double width = 1200.0;
     const double height = 1050.0;
     const double margin = 160.0;
+    // Restrict the plot to steps with `step <= 60`: walk back from the end of `points` while
+    // the trailing point's step number exceeds 60, shrinking plot_count accordingly.
     std::size_t plot_count = result.points.size();
     while (plot_count > 0 && result.points[plot_count - 1].step > 60) {
         --plot_count;
     }
+    // Always plot at least 2 points so the polylines/index math below stay well-defined.
     plot_count = std::max<std::size_t>(2, plot_count);
+    // Auto-scale the y axis to the larger of the two error curves over the plotted window,
+    // with a small floor (0.01) so the axis never collapses to zero height.
     double max_error = 0.01;
     for (std::size_t i = 0; i < plot_count; ++i) {
         max_error = std::max(max_error, std::max(result.points[i].goal_error, result.points[i].target_error));
@@ -592,6 +875,19 @@ void write_error_curve_svg(const std::filesystem::path& path, const ClosedLoopRe
     out << "</svg>\n";
 }
 
+/**
+ * @brief Render an SVG line chart of beacon position RMSE and beacon yaw RMSE vs. step.
+ *
+ * Same layout/scaling approach as write_error_curve_svg(), but restricted to the first 30
+ * steps (by `step` value) and plotting beacon_position_rmse (purple) and beacon_yaw_rmse
+ * (teal). The y-axis auto-scale (`max_error`) and the plotted yaw curve both special-case the
+ * -1.0 "yaw not applicable" sentinel (see Types.hpp / write_optional_metric()): points with
+ * beacon_yaw_rmse < 0 are excluded from the max_error computation, and when actually plotting
+ * the yaw polyline, such points are substituted with 0.0 rather than the sentinel value so the
+ * curve does not spike to a nonsensical negative-turned-large value. This means that for
+ * scenarios where yaw is never estimated (all points sentinel), the yaw curve degenerates to a
+ * flat line at 0.
+ */
 void write_beacon_error_svg(const std::filesystem::path& path, const ClosedLoopResult& result) {
     const double width = 1200.0;
     const double height = 1050.0;
@@ -604,6 +900,9 @@ void write_beacon_error_svg(const std::filesystem::path& path, const ClosedLoopR
     double max_error = 0.01;
     for (std::size_t i = 0; i < plot_count; ++i) {
         max_error = std::max(max_error, result.points[i].beacon_position_rmse);
+        // Skip the -1.0 "not applicable" sentinel when computing the axis scale, otherwise it
+        // would be (wrongly) ignored anyway since -1.0 < the position RMSE floor, but this
+        // guard keeps the intent explicit and matches the substitution used below.
         if (result.points[i].beacon_yaw_rmse >= 0.0) {
             max_error = std::max(max_error, result.points[i].beacon_yaw_rmse);
         }
@@ -659,6 +958,8 @@ void write_beacon_error_svg(const std::filesystem::path& path, const ClosedLoopR
     out << "\"/>\n";
     out << "<polyline fill=\"none\" stroke=\"#0891b2\" stroke-width=\"3\" points=\"";
     for (std::size_t i = 0; i < plot_count; ++i) {
+        // Sentinel substitution: draw "not applicable" yaw-RMSE points at 0 rather than at
+        // the raw -1.0 sentinel value, which would otherwise plot off-chart / below the axis.
         const double yaw = result.points[i].beacon_yaw_rmse >= 0.0 ? result.points[i].beacon_yaw_rmse : 0.0;
         out << sx(i) << ',' << sy(yaw) << ' ';
     }
@@ -666,6 +967,19 @@ void write_beacon_error_svg(const std::filesystem::path& path, const ClosedLoopR
     out << "</svg>\n";
 }
 
+/**
+ * @brief Render an SVG line chart of target RMSE vs. range noise sigma, for a fixed bearing
+ * noise "slice", overlaying three curves from the noise-robustness sweep (see
+ * write_noise_robustness_csv() / NoiseRobustnessRow): scenario 1 with 1 beacon (purple),
+ * scenario 1 with 2 beacons (teal), and scenario 2 (calibrated baseline) with 2 beacons
+ * (green).
+ *
+ * Only rows whose bearing_sigma matches `bearing_slice` (0.006, compared with a 1e-9
+ * tolerance for floating-point equality) and whose (scenario, beacons) combination is one of
+ * the three plotted series are considered at all -- both for computing the axis bounds
+ * (max_sigma, max_rmse, each floored at 0.001) and for drawing the actual curves. Rows are
+ * assumed to already be sorted by range_sigma; points are simply connected in row order.
+ */
 void write_noise_robustness_svg(const std::filesystem::path& path, const std::vector<NoiseRobustnessRow>& rows) {
     const double width = 1200.0;
     const double height = 650.0;
@@ -673,6 +987,9 @@ void write_noise_robustness_svg(const std::filesystem::path& path, const std::ve
     const double bearing_slice = 0.006;
     double max_sigma = 0.001;
     double max_rmse = 0.001;
+    // Axis bounds are derived only from the rows that will actually be plotted below: the
+    // fixed bearing-sigma slice, restricted to the three (scenario, beacon-count) series of
+    // interest.
     for (const auto& row : rows) {
         if (std::abs(row.bearing_sigma - bearing_slice) < 1e-9 &&
             (row.scenario == 1 || (row.scenario == 2 && row.beacons == 2))) {
@@ -720,6 +1037,9 @@ void write_noise_robustness_svg(const std::filesystem::path& path, const std::ve
     out << "<text x=\"38\" y=\"" << height / 2.0 + 65.0
         << "\" font-family=\"Arial\" font-size=\"28\" font-weight=\"bold\" fill=\"#374151\" transform=\"rotate(-90 38 "
         << height / 2.0 + 65.0 << ")\">target RMSE</text>\n";
+    // Draws one filtered curve (polyline + per-point markers) for a given (scenario,
+    // beacons) pair, restricted to the fixed bearing-sigma slice, in whatever row order the
+    // matching rows appear in `rows`.
     const auto curve = [&](int scenario, int beacons, const char* color) {
         out << "<polyline fill=\"none\" stroke=\"" << color << "\" stroke-width=\"3\" points=\"";
         for (const auto& row : rows) {
@@ -746,6 +1066,32 @@ void write_noise_robustness_svg(const std::filesystem::path& path, const std::ve
     out << "</svg>\n";
 }
 
+/**
+ * @brief Write a single self-contained, offline-viewable HTML page that animates all four
+ * simulation scenarios (interactive canvas-based viewer; no server or external assets).
+ *
+ * The four scenarios, selectable from a dropdown, correspond to the four arguments in order:
+ * `local_single_beacon` (local-frame unknown-pose model, 1 beacon), `scenario1` (local-frame
+ * unknown-pose model, 2 beacons), `scenario2` (calibrated global-frame baseline, 2 beacons),
+ * and `adaptive_localization` (the adaptive law + target-seeking controller run). The
+ * function emits one large HTML document via raw string literals: a `<style>` block, a static
+ * DOM layout (toolbar with scenario selector/play/prev/next/step-slider, a 2x2 canvas grid for
+ * the scene/error/target-scatter/beacon-scatter plots, and a metrics/legend sidebar), followed
+ * by a `<script>` block. Inside that script, the four runs are serialized to a JS array
+ * literal `DATA` by calling write_closed_loop_json() for the first three (ClosedLoopResult)
+ * arguments and write_adaptive_localization_json() for the last (AdaptiveLocalizationRun)
+ * argument, each separated by a literal comma written directly to `out`. The remainder of the
+ * script (embedded verbatim as a raw string, not generated per-call) implements: per-frame
+ * canvas drawing helpers (circle/cross/legend swatches), auto-fit view-bounds computation
+ * (bounds()/targetEstimateBounds()/beaconBounds(), each padding the data's bounding box),
+ * an affine world-to-canvas transform (transform(), analogous in purpose to
+ * SvgTransform::sx()/sy() but computed per-frame and per-canvas from the padded bounds, and
+ * square-aspect via a shared `span`), animated per-step rendering of the trajectory/estimate
+ * history with fading opacity for older samples, a metrics panel, and a beacon table showing
+ * live-computed vehicle/target range-bearing to each beacon estimate. `out` uses a numeric
+ * precision of 10 for the embedded JSON (set once, for the whole HTML document); the ostream
+ * is otherwise fed pre-formatted markup/script text.
+ */
 void write_html_viewer(
     const std::filesystem::path& path,
     const ClosedLoopResult& local_single_beacon,
@@ -818,6 +1164,10 @@ th:first-child,td:first-child{text-align:left}.legend{display:grid;gap:7px;paddi
 <div><span class="swatch" style="background:#7c3aed"></span><span class="swatch" style="background:#0891b2"></span><span class="swatch" style="background:#db2777"></span>Beacon History - x_hat_i(t)</div>
 </div></aside></main><script>
 const DATA=[)HTML";
+    // Build the JS `DATA` array literal by streaming each scenario's JSON object in turn,
+    // hand-inserting the separating commas; this must stay in the same order as the
+    // `<select id="scenario">` options above (index 0..3) since the front-end indexes
+    // straight into DATA by scenarioIndex.
     write_closed_loop_json(out, local_single_beacon);
     out << ",";
     write_closed_loop_json(out, scenario1);
@@ -864,6 +1214,15 @@ scenarioSelect.onchange=e=>{scenarioIndex=Number(e.target.value);stepIndex=0;sto
 </script></body></html>)HTML";
 }
 
+/**
+ * @brief Write the per-step time history of an adaptive-localization run to CSV.
+ *
+ * One row per AdaptiveLocalizationPoint in result.points, in step order: step index, robot
+ * position, target-estimate position, target error, goal error, and least-squares cost.
+ * AdaptiveLocalizationPoint has no beacon_position_rmse/beacon_yaw_rmse/retriggered fields
+ * (unlike ClosedLoopPoint), so this CSV has fewer columns than write_closed_loop_csv() and
+ * never needs write_optional_metric(). Fixed notation, 8 decimal places.
+ */
 void write_adaptive_localization_csv(
     const std::filesystem::path& path,
     const AdaptiveLocalizationRun& result) {

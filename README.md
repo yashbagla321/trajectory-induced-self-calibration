@@ -84,7 +84,14 @@ exactly.
   natively in pgfplots (matches the paper's fonts/math exactly, rather than
   a separately rendered raster image). Regenerate with
   `python scripts/export_conditioning_data.py` after running the
-  simulation binary (needs Pillow: `pip install Pillow`).
+  simulation binary (needs Pillow, see `requirements.txt`).
+- `figures/conditioning_summary.png` — a standalone raster rendering of the
+  same Fig. 2 data (two log-log scatter panels plus a shared legend), for
+  quick inspection without a LaTeX toolchain. Regenerate with
+  `python scripts/render_conditioning_summary.py`.
+
+Python scripts depend only on Pillow; install with
+`pip install -r requirements.txt`.
 
 ## Citation
 
