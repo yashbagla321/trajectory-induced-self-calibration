@@ -139,4 +139,16 @@ bool two_view_closed_form_initial_state(
     const std::vector<LocalFrameMeasurement>& measurements,
     std::vector<double>& state);
 
+/**
+ * RMSE of the estimated beacon positions / yaws against the true world
+ * (paired by index with `world.beacons` / `world.beacon_yaws`), shared by
+ * the batch simulator and the ROS 2 / Gazebo closed-loop node.
+ * beacon_position_rmse returns 0.0 for an empty estimate list;
+ * beacon_yaw_rmse wraps each yaw error to (-pi, pi] before squaring and
+ * returns -1.0 when there are no estimates (the "not applicable" sentinel
+ * used by scenario 2, where beacon yaw is not estimated).
+ */
+double beacon_position_rmse(const World& world, const std::vector<BeaconEstimate>& estimates);
+double beacon_yaw_rmse(const World& world, const std::vector<BeaconEstimate>& estimates);
+
 }  // namespace adaptive

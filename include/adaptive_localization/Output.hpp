@@ -79,11 +79,21 @@ void write_active_excitation_comparison_csv(
 void write_supervised_excitation_comparison_csv(
     const std::filesystem::path& path,
     const std::vector<SupervisedExcitationComparisonRow>& rows);
-/// Writes the fixed-schedule decay-rate sweep results (see
+/// Writes the fixed-schedule decay-rate Monte Carlo sweep results (see
 /// SupervisedLambdaSweepRow) to a CSV file.
 void write_supervised_lambda_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<SupervisedLambdaSweepRow>& rows);
+/// Writes the nontrivial target-seeking Monte Carlo comparison results (see
+/// SupervisedSeekingComparisonRow) to a CSV file.
+void write_supervised_seeking_comparison_csv(
+    const std::filesystem::path& path,
+    const std::vector<SupervisedSeekingComparisonRow>& rows);
+/// Writes the supervisor spread-threshold Monte Carlo ablation results (see
+/// SupervisedThresholdAblationRow) to a CSV file.
+void write_supervised_threshold_ablation_csv(
+    const std::filesystem::path& path,
+    const std::vector<SupervisedThresholdAblationRow>& rows);
 /// Convenience entry point that runs and writes a small fixed set of example
 /// CSVs into `output_dir`, useful for smoke-testing the output pipeline.
 void write_example_csvs(const std::filesystem::path& output_dir);

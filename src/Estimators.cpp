@@ -447,4 +447,34 @@ bool two_view_closed_form_initial_state(
     return true;
 }
 
+/** @brief RMSE of estimated vs. true beacon positions (paired by index with
+ *  `world.beacons`); returns 0.0 for an empty estimate list. See
+ *  Estimators.hpp for why this lives here rather than in Simulation.cpp. */
+double beacon_position_rmse(const World& world, const std::vector<BeaconEstimate>& estimates) {
+    if (estimates.empty()) {
+        return 0.0;
+    }
+    double sum = 0.0;
+    for (std::size_t i = 0; i < estimates.size(); ++i) {
+        const Vec2 error = estimates[i].position - world.beacons[i];
+        sum += dot(error, error);
+    }
+    return std::sqrt(sum / static_cast<double>(estimates.size()));
+}
+
+/** @brief RMSE of estimated vs. true beacon yaw (wrapped to (-pi, pi] before
+ *  squaring); returns the sentinel -1.0 for an empty estimate list, matching
+ *  the "not applicable" convention used by scenario 2 (no yaw estimated). */
+double beacon_yaw_rmse(const World& world, const std::vector<BeaconEstimate>& estimates) {
+    if (estimates.empty()) {
+        return -1.0;
+    }
+    double sum = 0.0;
+    for (std::size_t i = 0; i < estimates.size(); ++i) {
+        const double error = wrap_angle(estimates[i].yaw - world.beacon_yaws[i]);
+        sum += error * error;
+    }
+    return std::sqrt(sum / static_cast<double>(estimates.size()));
+}
+
 }  // namespace adaptive

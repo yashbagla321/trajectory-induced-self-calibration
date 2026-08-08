@@ -598,33 +598,133 @@ void write_supervised_excitation_comparison_csv(
 }
 
 /**
- * @brief Write the supervised-retriggering lambda (sensitivity threshold) sweep to CSV.
+ * @brief Write the fixed-schedule decay-rate (lambda) Monte Carlo sweep to CSV.
  *
- * One row per SupervisedLambdaSweepRow: the lambda threshold value, how many times the
- * supervised controller retriggered at that lambda, and final-error metrics for both a fixed
- * (non-retriggering) baseline and the supervised controller side by side: target error,
- * beacon position RMSE, and beacon yaw RMSE for each, with `_m`/`_rad` unit suffixes. This
- * lets the two conditions be compared directly at each lambda value.
+ * One row per SupervisedLambdaSweepRow: the decay rate lambda, the paired Monte Carlo batch
+ * size (`trials`), the supervised controller's mean retrigger count at that lambda, and
+ * across-trial RMSE metrics for both the fixed baseline and the supervised controller side by
+ * side: target RMSE, beacon position RMSE, and beacon yaw RMSE, each with its
+ * percentile-bootstrap 95% CI ([ci_lo, ci_hi] columns) and a yaw success rate (fraction of
+ * trials at or below the declared 0.05-rad criterion), with `_m`/`_rad` unit suffixes. This
+ * lets the two policies be compared directly at each lambda value.
  */
 void write_supervised_lambda_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<SupervisedLambdaSweepRow>& rows) {
     write_csv(
         path,
-        "lambda,supervised_retrigger_count,"
-        "fixed_final_target_error_m,fixed_final_beacon_position_rmse_m,"
-        "fixed_final_beacon_yaw_rmse_rad,"
-        "supervised_final_target_error_m,supervised_final_beacon_position_rmse_m,"
-        "supervised_final_beacon_yaw_rmse_rad\n",
+        "lambda,trials,supervised_mean_retrigger_count,"
+        "fixed_target_rmse_m,fixed_target_rmse_ci_lo_m,fixed_target_rmse_ci_hi_m,"
+        "fixed_beacon_position_rmse_m,fixed_beacon_position_rmse_ci_lo_m,"
+        "fixed_beacon_position_rmse_ci_hi_m,"
+        "fixed_beacon_yaw_rmse_rad,fixed_beacon_yaw_rmse_ci_lo_rad,"
+        "fixed_beacon_yaw_rmse_ci_hi_rad,fixed_yaw_success_rate,"
+        "supervised_target_rmse_m,supervised_target_rmse_ci_lo_m,"
+        "supervised_target_rmse_ci_hi_m,"
+        "supervised_beacon_position_rmse_m,supervised_beacon_position_rmse_ci_lo_m,"
+        "supervised_beacon_position_rmse_ci_hi_m,"
+        "supervised_beacon_yaw_rmse_rad,supervised_beacon_yaw_rmse_ci_lo_rad,"
+        "supervised_beacon_yaw_rmse_ci_hi_rad,supervised_yaw_success_rate\n",
         rows,
         [](std::ostream& out, const SupervisedLambdaSweepRow& row) {
-            out << row.lambda << ',' << row.supervised_retrigger_count << ','
-                << row.fixed_final_target_error << ','
-                << row.fixed_final_beacon_position_rmse << ','
-                << row.fixed_final_beacon_yaw_rmse << ','
-                << row.supervised_final_target_error << ','
-                << row.supervised_final_beacon_position_rmse << ','
-                << row.supervised_final_beacon_yaw_rmse;
+            out << row.lambda << ',' << row.trials << ','
+                << row.supervised_mean_retrigger_count << ','
+                << row.fixed_target_rmse << ',' << row.fixed_target_rmse_ci_lo << ','
+                << row.fixed_target_rmse_ci_hi << ','
+                << row.fixed_beacon_position_rmse << ',' << row.fixed_beacon_position_rmse_ci_lo << ','
+                << row.fixed_beacon_position_rmse_ci_hi << ','
+                << row.fixed_beacon_yaw_rmse << ',' << row.fixed_beacon_yaw_rmse_ci_lo << ','
+                << row.fixed_beacon_yaw_rmse_ci_hi << ',' << row.fixed_yaw_success_rate << ','
+                << row.supervised_target_rmse << ',' << row.supervised_target_rmse_ci_lo << ','
+                << row.supervised_target_rmse_ci_hi << ','
+                << row.supervised_beacon_position_rmse << ','
+                << row.supervised_beacon_position_rmse_ci_lo << ','
+                << row.supervised_beacon_position_rmse_ci_hi << ','
+                << row.supervised_beacon_yaw_rmse << ',' << row.supervised_beacon_yaw_rmse_ci_lo << ','
+                << row.supervised_beacon_yaw_rmse_ci_hi << ','
+                << row.supervised_yaw_success_rate;
+        });
+}
+
+/**
+ * @brief Write the nontrivial target-seeking Monte Carlo comparison to CSV.
+ *
+ * One row per SupervisedSeekingComparisonRow (one per excitation policy): policy name, paired
+ * Monte Carlo batch size (`trials`), mean retrigger count, the goal/target/yaw success rates,
+ * the goal-reached rate with the mean packets-to-goal and its normal-approximation 95% CI
+ * among trials that reached it, and across-trial final RMSEs (goal, target, beacon position,
+ * beacon yaw) each with a percentile-bootstrap 95% CI ([ci_lo, ci_hi] columns), with
+ * `_m`/`_rad` unit suffixes on the distance/angle columns.
+ */
+void write_supervised_seeking_comparison_csv(
+    const std::filesystem::path& path,
+    const std::vector<SupervisedSeekingComparisonRow>& rows) {
+    write_csv(
+        path,
+        "excitation,trials,mean_retrigger_count,"
+        "goal_success_rate,target_success_rate,yaw_success_rate,"
+        "goal_reached_rate,steps_to_goal_mean,steps_to_goal_ci95,"
+        "final_goal_rmse_m,final_goal_rmse_ci_lo_m,final_goal_rmse_ci_hi_m,"
+        "final_target_rmse_m,final_target_rmse_ci_lo_m,final_target_rmse_ci_hi_m,"
+        "final_beacon_position_rmse_m,final_beacon_position_rmse_ci_lo_m,"
+        "final_beacon_position_rmse_ci_hi_m,"
+        "final_beacon_yaw_rmse_rad,final_beacon_yaw_rmse_ci_lo_rad,"
+        "final_beacon_yaw_rmse_ci_hi_rad\n",
+        rows,
+        [](std::ostream& out, const SupervisedSeekingComparisonRow& row) {
+            out << row.excitation << ',' << row.trials << ',' << row.mean_retrigger_count << ','
+                << row.goal_success_rate << ',' << row.target_success_rate << ','
+                << row.yaw_success_rate << ','
+                << row.goal_reached_rate << ',' << row.steps_to_goal_mean << ','
+                << row.steps_to_goal_ci95 << ','
+                << row.final_goal_rmse << ',' << row.final_goal_rmse_ci_lo << ','
+                << row.final_goal_rmse_ci_hi << ','
+                << row.final_target_rmse << ',' << row.final_target_rmse_ci_lo << ','
+                << row.final_target_rmse_ci_hi << ','
+                << row.final_beacon_position_rmse << ','
+                << row.final_beacon_position_rmse_ci_lo << ','
+                << row.final_beacon_position_rmse_ci_hi << ','
+                << row.final_beacon_yaw_rmse << ',' << row.final_beacon_yaw_rmse_ci_lo << ','
+                << row.final_beacon_yaw_rmse_ci_hi;
+        });
+}
+
+/**
+ * @brief Write the supervisor spread-threshold (S_bar) Monte Carlo ablation to CSV.
+ *
+ * One row per SupervisedThresholdAblationRow: the candidate spread threshold, Monte Carlo
+ * batch size (`trials`), the design rule's predicted yaw RMSE sigma/sqrt(S_bar) next to the
+ * measured across-trial yaw RMSE with its percentile-bootstrap 95% CI and the (fixed,
+ * 0.05-rad) yaw success rate, the threshold-reached rate with the mean packets-to-threshold
+ * and its normal-approximation 95% CI, the excitation cost columns (mean retrigger/episode
+ * counts, mean traveled path length, mean integrated excitation effort), and across-trial
+ * target/beacon-position RMSEs with bootstrap CIs, with `_m`/`_rad` unit suffixes.
+ */
+void write_supervised_threshold_ablation_csv(
+    const std::filesystem::path& path,
+    const std::vector<SupervisedThresholdAblationRow>& rows) {
+    write_csv(
+        path,
+        "spread_threshold,trials,predicted_yaw_rmse_rad,"
+        "yaw_rmse_rad,yaw_rmse_ci_lo_rad,yaw_rmse_ci_hi_rad,yaw_success_rate,"
+        "threshold_reached_rate,packets_to_threshold_mean,packets_to_threshold_ci95,"
+        "mean_retrigger_count,mean_episode_count,mean_path_length_m,"
+        "mean_excitation_effort,"
+        "target_rmse_m,target_rmse_ci_lo_m,target_rmse_ci_hi_m,"
+        "beacon_position_rmse_m,beacon_position_rmse_ci_lo_m,"
+        "beacon_position_rmse_ci_hi_m\n",
+        rows,
+        [](std::ostream& out, const SupervisedThresholdAblationRow& row) {
+            out << row.spread_threshold << ',' << row.trials << ',' << row.predicted_yaw_rmse << ','
+                << row.yaw_rmse << ',' << row.yaw_rmse_ci_lo << ',' << row.yaw_rmse_ci_hi << ','
+                << row.yaw_success_rate << ','
+                << row.threshold_reached_rate << ',' << row.packets_to_threshold_mean << ','
+                << row.packets_to_threshold_ci95 << ','
+                << row.mean_retrigger_count << ',' << row.mean_episode_count << ','
+                << row.mean_path_length << ',' << row.mean_excitation_effort << ','
+                << row.target_rmse << ',' << row.target_rmse_ci_lo << ',' << row.target_rmse_ci_hi << ','
+                << row.beacon_position_rmse << ',' << row.beacon_position_rmse_ci_lo << ','
+                << row.beacon_position_rmse_ci_hi;
         });
 }
 
@@ -657,7 +757,8 @@ void write_example_csvs(const std::filesystem::path& output_dir) {
  * One row per ClosedLoopPoint in result.points, in step order: step index, robot position,
  * target-estimate position, target error, goal error, beacon position RMSE, beacon yaw RMSE
  * (blank via write_optional_metric() when the -1.0 sentinel indicates yaw is not estimated,
- * e.g. for the calibrated baseline scenario), least-squares cost, and whether active
+ * e.g. for the calibrated baseline scenario), least-squares cost, the supervision/diagnostic
+ * columns (`spread`, `sigma_min`, `excitation_norm2` -- see below), and whether active
  * excitation was retriggered at that step (0/1). This is the CSV counterpart of the per-run
  * time series also embedded as JSON by write_closed_loop_json() for the HTML viewer.
  */
@@ -665,7 +766,8 @@ void write_closed_loop_csv(const std::filesystem::path& path, const ClosedLoopRe
     write_csv(
         path,
         "step,robot_x,robot_y,target_estimate_x,target_estimate_y,target_error,goal_error,"
-        "beacon_position_rmse,beacon_yaw_rmse,cost,retriggered\n",
+        "beacon_position_rmse,beacon_yaw_rmse,cost,spread,sigma_min,excitation_norm2,"
+        "retriggered\n",
         result.points,
         [](std::ostream& out, const ClosedLoopPoint& point) {
             out << point.step << ',' << point.robot.x << ',' << point.robot.y << ','
@@ -673,7 +775,15 @@ void write_closed_loop_csv(const std::filesystem::path& path, const ClosedLoopRe
                 << point.target_error << ',' << point.goal_error << ','
                 << point.beacon_position_rmse << ',';
             write_optional_metric(out, point.beacon_yaw_rmse);
-            out << ',' << point.cost << ',' << (point.retriggered ? 1 : 0);
+            // `spread` is the path-based S_v of the stored window at this step
+            // (the exact quantity the excitation supervisor triggers on);
+            // `sigma_min` is the whitened-Jacobian conditioning diagnostic, blank
+            // when not applicable (scenario 2 / multi-beacon); `excitation_norm2`
+            // is ||u_exp||^2 at this step (sum over steps times dt gives the
+            // integrated excitation effort).
+            out << ',' << point.cost << ',' << point.spread << ',';
+            write_optional_metric(out, point.sigma_min);
+            out << ',' << point.excitation_norm2 << ',' << (point.retriggered ? 1 : 0);
         });
 }
 

@@ -105,7 +105,8 @@ struct BeaconEstimate {
  * applicable" (e.g. under scenario 2, where beacon yaw is not estimated).
  * `retriggered` marks steps where the excitation-supervised controller (see
  * Simulation.hpp's ClosedLoopExcitationMode::Supervised) restarted its
- * exploration epoch because observability had degraded below a threshold.
+ * exploration epoch because the stored window's trajectory spread was still
+ * below the supervisor's threshold.
  */
 struct ClosedLoopPoint {
     int step = 0;
@@ -117,6 +118,24 @@ struct ClosedLoopPoint {
     double beacon_position_rmse = 0.0;
     double beacon_yaw_rmse = -1.0;
     double cost = 0.0;
+    /// Accumulated trajectory spread S_v = sum_k ||q_k - q_bar||^2 over the
+    /// poses at which measurements have been taken so far (the stored
+    /// window). Computed from the known vehicle path (see Math.hpp's
+    /// path_spread), so it is exactly the noiseless certificate the theory
+    /// supervises on -- not a measurement-derived estimate of it. 0.0 at
+    /// step 0 (empty window).
+    double spread = 0.0;
+    /// Diagnostic only (never a control trigger): smallest singular value of
+    /// the noise-whitened stacked measurement Jacobian at the current
+    /// scenario-1 estimate, whitened with the closed-loop noise sigmas.
+    /// -1.0 when not applicable (scenario 2, or multi-beacon runs).
+    double sigma_min = -1.0;
+    /// Squared norm of the exploratory excitation command u_exp applied at
+    /// this step (0 at step 0, where no control has been applied). Summed
+    /// over a run and scaled by dt this gives the integrated excitation
+    /// effort sum_k ||u_k^exp||^2 * dt used by the threshold ablation's
+    /// accuracy-vs-effort tradeoff.
+    double excitation_norm2 = 0.0;
     bool retriggered = false;
 };
 
@@ -164,20 +183,120 @@ struct SupervisedExcitationComparisonRow {
     double final_cost = 0.0;
 };
 
-/// One row of run_supervised_lambda_sweep's output: at a given fixed-schedule
-/// decay rate `lambda`, compares the fixed decaying-swirl excitation
-/// schedule ("fixed_*" fields) against the excitation-supervised controller
-/// ("supervised_*" fields), including how many times the supervised
-/// controller retriggered its excitation epoch.
+/// One row of run_supervised_lambda_sweep's output, aggregated over a paired
+/// Monte Carlo batch: at each fixed-schedule decay rate `lambda`, `trials`
+/// independent noise realizations are run, with the fixed ("fixed_*" fields)
+/// and supervised ("supervised_*" fields) policies sharing the same seed per
+/// trial. Error columns are across-trial RMSEs sqrt((1/M) sum e_j^2) -- the
+/// population statistic the design rule var(psi_hat) ~ sigma^2 / S_v
+/// predicts -- with percentile-bootstrap 95% confidence intervals reported
+/// as [ci_lo, ci_hi]. The *_yaw_success_rate columns are the fraction of
+/// trials whose final beacon-yaw error is at or below the paper's declared
+/// 0.05-rad accuracy criterion.
 struct SupervisedLambdaSweepRow {
     double lambda = 0.0;
-    int supervised_retrigger_count = 0;
-    double fixed_final_target_error = 0.0;
-    double fixed_final_beacon_position_rmse = 0.0;
-    double fixed_final_beacon_yaw_rmse = 0.0;
-    double supervised_final_target_error = 0.0;
-    double supervised_final_beacon_position_rmse = 0.0;
-    double supervised_final_beacon_yaw_rmse = 0.0;
+    int trials = 0;
+    double supervised_mean_retrigger_count = 0.0;
+    double fixed_target_rmse = 0.0;
+    double fixed_target_rmse_ci_lo = 0.0;
+    double fixed_target_rmse_ci_hi = 0.0;
+    double fixed_beacon_position_rmse = 0.0;
+    double fixed_beacon_position_rmse_ci_lo = 0.0;
+    double fixed_beacon_position_rmse_ci_hi = 0.0;
+    double fixed_beacon_yaw_rmse = 0.0;
+    double fixed_beacon_yaw_rmse_ci_lo = 0.0;
+    double fixed_beacon_yaw_rmse_ci_hi = 0.0;
+    double fixed_yaw_success_rate = 0.0;
+    double supervised_target_rmse = 0.0;
+    double supervised_target_rmse_ci_lo = 0.0;
+    double supervised_target_rmse_ci_hi = 0.0;
+    double supervised_beacon_position_rmse = 0.0;
+    double supervised_beacon_position_rmse_ci_lo = 0.0;
+    double supervised_beacon_position_rmse_ci_hi = 0.0;
+    double supervised_beacon_yaw_rmse = 0.0;
+    double supervised_beacon_yaw_rmse_ci_lo = 0.0;
+    double supervised_beacon_yaw_rmse_ci_hi = 0.0;
+    double supervised_yaw_success_rate = 0.0;
+};
+
+/// One row (per excitation policy) of run_supervised_seeking_comparison's
+/// nontrivial target-seeking comparison: the vehicle starts AT the wrong
+/// initial target estimate, so the seeking term of the controller is
+/// initially quiescent and only the excitation policy can generate the
+/// spread needed to calibrate -- making target-seeking success genuinely
+/// contingent on excitation, unlike the calibration-isolation decay sweep.
+/// Aggregated over a paired Monte Carlo batch; error columns are
+/// across-trial RMSEs with percentile-bootstrap 95% confidence intervals,
+/// as in SupervisedLambdaSweepRow.
+struct SupervisedSeekingComparisonRow {
+    std::string excitation;
+    int trials = 0;
+    double mean_retrigger_count = 0.0;
+    /// Fraction of trials whose final vehicle-to-target distance / final
+    /// target-estimate error / final beacon-yaw error meet the configured
+    /// goal and target thresholds and the paper's declared 0.05-rad yaw
+    /// accuracy criterion respectively.
+    double goal_success_rate = 0.0;
+    double target_success_rate = 0.0;
+    double yaw_success_rate = 0.0;
+    /// Fraction of trials that crossed the goal threshold at any step, and
+    /// the mean (with normal-approximation 95% CI) packets needed to first
+    /// cross it among those trials -- the time-to-accuracy statistic that
+    /// separates guaranteed excitation acquisition from jitter-driven
+    /// self-excitation.
+    double goal_reached_rate = 0.0;
+    double steps_to_goal_mean = 0.0;
+    double steps_to_goal_ci95 = 0.0;
+    double final_goal_rmse = 0.0;
+    double final_goal_rmse_ci_lo = 0.0;
+    double final_goal_rmse_ci_hi = 0.0;
+    double final_target_rmse = 0.0;
+    double final_target_rmse_ci_lo = 0.0;
+    double final_target_rmse_ci_hi = 0.0;
+    double final_beacon_position_rmse = 0.0;
+    double final_beacon_position_rmse_ci_lo = 0.0;
+    double final_beacon_position_rmse_ci_hi = 0.0;
+    double final_beacon_yaw_rmse = 0.0;
+    double final_beacon_yaw_rmse_ci_lo = 0.0;
+    double final_beacon_yaw_rmse_ci_hi = 0.0;
+};
+
+/// One row of run_supervised_threshold_ablation's spread-threshold ablation:
+/// the supervised policy is run over a Monte Carlo batch at each candidate
+/// S_bar, holding the trial success criterion FIXED at the paper's declared
+/// 0.05-rad yaw accuracy so that success measures the same accuracy at every
+/// threshold. The predicted_yaw_rmse column is the design rule eps_psi =
+/// sigma / sqrt(S_bar), placed next to the measured across-trial yaw RMSE
+/// (with percentile-bootstrap 95% CI) so the table directly tests the rule's
+/// population-RMSE prediction. Cost columns quantify what buying more
+/// excitation costs: packets until the stored window's spread first reaches
+/// S_bar, underexcited (retriggered) packets, excitation episodes (maximal
+/// runs of consecutive retriggered packets), traveled path length, and
+/// integrated excitation effort sum_k ||u_k^exp||^2 * dt.
+struct SupervisedThresholdAblationRow {
+    double spread_threshold = 0.0;
+    int trials = 0;
+    double predicted_yaw_rmse = 0.0;
+    double yaw_rmse = 0.0;
+    double yaw_rmse_ci_lo = 0.0;
+    double yaw_rmse_ci_hi = 0.0;
+    double yaw_success_rate = 0.0;
+    /// Fraction of trials whose window spread ever reached S_bar, and the
+    /// mean (with normal-approximation 95% CI) packets to first reach it
+    /// among those trials.
+    double threshold_reached_rate = 0.0;
+    double packets_to_threshold_mean = 0.0;
+    double packets_to_threshold_ci95 = 0.0;
+    double mean_retrigger_count = 0.0;
+    double mean_episode_count = 0.0;
+    double mean_path_length = 0.0;
+    double mean_excitation_effort = 0.0;
+    double target_rmse = 0.0;
+    double target_rmse_ci_lo = 0.0;
+    double target_rmse_ci_hi = 0.0;
+    double beacon_position_rmse = 0.0;
+    double beacon_position_rmse_ci_lo = 0.0;
+    double beacon_position_rmse_ci_hi = 0.0;
 };
 
 /// Outcome of a single batch Monte Carlo trial (one noisy dataset, one

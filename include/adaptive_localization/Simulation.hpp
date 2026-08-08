@@ -2,6 +2,7 @@
 
 #include <array>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include "adaptive_localization/Config.hpp"
@@ -51,9 +52,13 @@ enum class ClosedLoopExcitationMode {
      *  fixed schedule. */
     Information,
     /** Excitation-supervised mode (Algorithm 1 in the CDC closed-loop
-     *  paper): the decaying schedule's epoch is retriggered whenever the
-     *  recent trajectory spread or local-observability sigma_min/rank falls
-     *  below a configured threshold, rather than decaying unconditionally. */
+     *  paper): the decaying schedule's epoch is retriggered while the
+     *  stored window's trajectory spread S_v (computed from the known
+     *  measurement poses, see Math.hpp's path_spread) is below the
+     *  configured threshold, rather than decaying unconditionally.
+     *  Conditioning (sigma_min) is logged per step as a diagnostic but is
+     *  deliberately never a trigger: the finite-acquisition guarantee
+     *  covers only the spread threshold. */
     Supervised,
 };
 
@@ -161,13 +166,64 @@ std::vector<SupervisedExcitationComparisonRow> run_supervised_excitation_compari
 /**
  * @brief Sweeps the fixed schedule's decay rate lambda in the no-transient
  * scenario (vehicle initialized at the true target), comparing fixed vs
- * supervised final calibration accuracy at each value and recording the
- * supervised controller's retrigger count. Establishes robustness to
- * mismatch in the unknown time-to-adequate-excitation rather than
- * superiority in one hand-selected failure case.
+ * supervised final calibration accuracy at each value over a paired Monte
+ * Carlo batch (`config.supervised_monte_carlo_trials` trials per lambda,
+ * fixed and supervised sharing the same seed per trial). Establishes
+ * robustness to mismatch in the unknown time-to-adequate-excitation rather
+ * than superiority in one hand-selected failure case.
+ *
+ * @return One SupervisedLambdaSweepRow per swept lambda, carrying
+ *         across-trial RMSEs with bootstrap 95% CIs, yaw success rates, and
+ *         the supervised controller's mean retrigger count.
  */
 std::vector<SupervisedLambdaSweepRow> run_supervised_lambda_sweep(
     const SimulationConfig& config);
+
+/**
+ * @brief Paired Monte Carlo comparison in the nontrivial target-seeking
+ * scenario: the vehicle starts at the wrong initial target estimate
+ * (seeking term initially quiescent), so target-seeking success depends on
+ * the excitation policy generating enough spread to calibrate.
+ *
+ * @return One aggregate SupervisedSeekingComparisonRow per policy (fixed
+ *         decaying-circular vs excitation-supervised).
+ */
+std::vector<SupervisedSeekingComparisonRow> run_supervised_seeking_comparison(
+    const SimulationConfig& config);
+
+/**
+ * @brief Monte Carlo ablation over the supervisor's spread threshold S_bar
+ * in the understimulated scenario (supervised policy only), holding the
+ * trial success criterion fixed at the paper's declared 0.05-rad yaw
+ * accuracy. Each row pairs the design rule's predicted yaw RMSE
+ * sigma / sqrt(S_bar) with the measured across-trial RMSE and the
+ * excitation cost of reaching that threshold (packets, underexcited
+ * packets, episodes, path length, integrated effort).
+ */
+std::vector<SupervisedThresholdAblationRow> run_supervised_threshold_ablation(
+    const SimulationConfig& config);
+
+/**
+ * @brief Rank and smallest singular value of the whitened stacked Jacobian
+ * of the single-beacon scenario-1 model at `state`, whitened with `noise`.
+ * This is the conditioning diagnostic the closed-loop experiments log
+ * alongside the spread certificate (it is deliberately never a control
+ * trigger). The rank counts singular values above a relative threshold
+ * `max(1e-6, sigma_max*1e-7)`; when rank < 5, sigma_min is reported as 0.0
+ * rather than a meaningless near-zero value, since a gauge-degenerate
+ * direction exists (e.g. from a stationary or collinear trajectory) and no
+ * singular value meaningfully bounds the estimator's conditioning. Returns
+ * rank 0 / sigma_min 0 for any state that is not the 5-dimensional
+ * single-beacon model. Exported so the ROS 2 / Gazebo closed-loop node logs
+ * the same quantity as the batch simulator.
+ *
+ * @return {rank, sigma_min}; sigma_min is 0.0 whenever rank != 5.
+ */
+std::pair<int, double> local_observability_rank_and_sigma_min(
+    const std::vector<double>& state,
+    const std::vector<Vec2>& path,
+    const std::vector<LocalFrameMeasurement>& measurements,
+    const Noise& noise = Noise{});
 
 /**
  * @brief Runs one Monte Carlo trial: builds a fresh world and vehicle path,

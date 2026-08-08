@@ -304,12 +304,12 @@ SimulationConfig load_config(const std::filesystem::path& path) {
         get_double(values, "information_gradient_step", config.information_gradient_step);
     config.supervised_spread_threshold =
         get_double(values, "supervised_spread_threshold", config.supervised_spread_threshold);
-    config.supervised_sigma_min_threshold =
-        get_double(values, "supervised_sigma_min_threshold", config.supervised_sigma_min_threshold);
     config.supervised_goal_error_threshold =
         get_double(values, "supervised_goal_error_threshold", config.supervised_goal_error_threshold);
     config.supervised_target_error_threshold =
         get_double(values, "supervised_target_error_threshold", config.supervised_target_error_threshold);
+    config.supervised_monte_carlo_trials =
+        get_int(values, "supervised_monte_carlo_trials", config.supervised_monte_carlo_trials);
     config.initial_robot.x = get_double(values, "initial_robot_x", config.initial_robot.x);
     config.initial_robot.y = get_double(values, "initial_robot_y", config.initial_robot.y);
     config.initial_target_estimate.x =
@@ -446,15 +446,22 @@ exploration_frequency = 0.45
 information_exploration_gain = 0.35
 information_gradient_step = 0.08
 
-# Excitation-supervised mode. The excitation epoch resets whenever the stored
-# window's trajectory spread or local-observability sigma_min falls below
-# these thresholds, in place of the fixed decaying-swirl schedule. The
-# threshold_m settings define "converged" for the packets-to-threshold
-# comparison against the fixed schedule.
-supervised_spread_threshold = 0.05
-supervised_sigma_min_threshold = 0.05
+# Excitation-supervised mode. The excitation epoch resets while the stored
+# window's trajectory spread S_v (computed from the known measurement poses)
+# is below this threshold, in place of the fixed decaying-swirl schedule.
+# Conditioning (sigma_min) is logged as a diagnostic, not a trigger. The
+# default 0.16 comes from the accuracy-driven selection rule
+# S_bar = sigma^2 / eps_psi^2 with range sigma 0.02 m and the declared
+# 0.05-rad yaw-RMSE success criterion. The error_threshold settings define
+# "converged" for the packets-to-threshold comparison against the fixed
+# schedule.
+supervised_spread_threshold = 0.16
 supervised_goal_error_threshold = 0.05
 supervised_target_error_threshold = 0.01
+
+# Paired Monte Carlo batch size for the decay-rate sweep and target-seeking
+# comparison (fixed and supervised policies share the same seed per trial).
+supervised_monte_carlo_trials = 100
 
 # Initial robot position for the closed-loop visualization.
 initial_robot_x = -3.0

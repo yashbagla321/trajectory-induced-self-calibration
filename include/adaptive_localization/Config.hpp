@@ -56,12 +56,24 @@ struct SimulationConfig {
     double information_gradient_step = 0.08;
 
     // Excitation-supervised mode (Algorithm 1 in the CDC closed-loop paper):
-    // the excitation epoch resets whenever the stored window falls below
-    // either threshold, in place of the fixed decaying-swirl schedule.
-    double supervised_spread_threshold = 0.05;
-    double supervised_sigma_min_threshold = 0.05;
+    // the excitation epoch resets while the stored window's trajectory
+    // spread S_v (computed from the known measurement poses) is below
+    // supervised_spread_threshold, in place of the fixed decaying-swirl
+    // schedule. Conditioning (sigma_min) is logged as a diagnostic but is
+    // deliberately not a trigger: the finite-acquisition guarantee covers
+    // only the spread threshold. The default S_bar = 0.16 comes from the
+    // accuracy-driven selection rule S_bar = sigma^2 / eps_psi^2 with the
+    // closed-loop range sigma = 0.02 m and the paper's declared 0.05-rad
+    // yaw-RMSE success criterion. The *_error_threshold settings define
+    // "converged" for the packets-to-threshold comparison against the fixed
+    // schedule.
+    double supervised_spread_threshold = 0.16;
     double supervised_goal_error_threshold = 0.05;
     double supervised_target_error_threshold = 0.01;
+    // Paired Monte Carlo batch size for the decay-rate sweep and the
+    // target-seeking comparison (fixed and supervised share the same seed
+    // per trial, so differences are attributable to the policy).
+    int supervised_monte_carlo_trials = 100;
 
     // Initial robot position used by closed-loop visualizations.
     Vec2 initial_robot{-3.0, 2.6};

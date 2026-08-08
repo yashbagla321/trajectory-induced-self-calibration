@@ -261,34 +261,10 @@ std::vector<BeaconEstimate> core_beacon_estimates(
     return estimates;
 }
 
-/** @brief RMSE of estimated vs. true beacon positions (paired by index with
- *  `world.beacons`); returns 0.0 for an empty estimate list. */
-double beacon_position_rmse(const World& world, const std::vector<BeaconEstimate>& estimates) {
-    if (estimates.empty()) {
-        return 0.0;
-    }
-    double sum = 0.0;
-    for (std::size_t i = 0; i < estimates.size(); ++i) {
-        const Vec2 error = estimates[i].position - world.beacons[i];
-        sum += dot(error, error);
-    }
-    return std::sqrt(sum / static_cast<double>(estimates.size()));
-}
-
-/** @brief RMSE of estimated vs. true beacon yaw (wrapped to (-pi, pi] before
- *  squaring); returns the sentinel -1.0 for an empty estimate list, matching
- *  the "not applicable" convention used by scenario 2 (no yaw estimated). */
-double beacon_yaw_rmse(const World& world, const std::vector<BeaconEstimate>& estimates) {
-    if (estimates.empty()) {
-        return -1.0;
-    }
-    double sum = 0.0;
-    for (std::size_t i = 0; i < estimates.size(); ++i) {
-        const double error = wrap_angle(estimates[i].yaw - world.beacon_yaws[i]);
-        sum += error * error;
-    }
-    return std::sqrt(sum / static_cast<double>(estimates.size()));
-}
+// beacon_position_rmse() and beacon_yaw_rmse() previously defined here now
+// live in Estimators.cpp (declared in Estimators.hpp), shared with the
+// ROS 2 / Gazebo closed-loop node rather than kept private to this
+// translation unit.
 
 /**
  * @brief Simple pass/fail accuracy gate for one trial: target error and
@@ -334,19 +310,38 @@ std::vector<double> true_state_scenario1(const World& world) {
  * Jacobian, which local_observability_metrics() turns into rank,
  * sigma_min/sigma_max, condition number, and log-determinant.
  *
+ * NOTE: this routine (and everything downstream of it) is scoped to the
+ * single-beacon scenario-1 model: the normal matrix is fixed at 5x5 and the
+ * Jacobian is evaluated with beacon_count = 1. The guard below rejects any
+ * other state size rather than silently producing metrics for the wrong
+ * model.
+ *
  * @param state        5-element state [target.x, target.y, beacon.x,
  *        beacon.y, beacon.yaw] at which the Jacobian is linearized.
  * @param path         Known vehicle path (only entries referenced by
  *        `measurements` matter).
  * @param measurements Local-frame measurements of the single beacon.
- * @return Row-major flattened 5x5 symmetric normal matrix.
+ * @param noise        Residual whitening; defaults to the estimator-default
+ *        sigmas so the open-loop conditioning studies keep their published
+ *        whitening, while the closed-loop supervisor passes its own noise
+ *        level explicitly.
+ * @return Row-major flattened 5x5 symmetric normal matrix, or the zero
+ *         matrix (rank 0 / sigma_min 0 downstream) when `state` is not the
+ *         5-dimensional single-beacon model.
  */
 std::array<double, 25> normal_matrix_for_local_observability(
     const std::vector<double>& state,
     const std::vector<Vec2>& path,
-    const std::vector<LocalFrameMeasurement>& measurements) {
+    const std::vector<LocalFrameMeasurement>& measurements,
+    const Noise& noise = Noise{}) {
     constexpr int n = 5;
-    const auto jacobian = jacobian_scenario1(state, 1, path, measurements);
+    if (state.size() != 5) {
+        // Wrong model dimension: return the zero matrix, which downstream
+        // reads as rank 0 / sigma_min 0 ("unobservable") -- a conservative,
+        // visible failure instead of a silently wrong metric.
+        return {};
+    }
+    const auto jacobian = jacobian_scenario1(state, 1, path, measurements, noise);
     std::array<double, 25> normal{};
 
     // Accumulate J^T J directly (only the upper triangle is computed, then
@@ -373,6 +368,11 @@ std::array<double, 25> normal_matrix_for_local_observability(
  * spread indicates the vehicle was observed from many different relative
  * angles/ranges (good for self-calibration); a near-zero spread indicates
  * a near-stationary or collinear/degenerate viewing history.
+ *
+ * The supervisor's path-based certificate S_v now lives in Math.hpp as
+ * adaptive::path_spread, shared with the ROS 2 / Gazebo closed-loop node.
+ * This measurement-derived trajectory_spread() is retained only for the
+ * open-loop conditioning diagnostics.
  *
  * @param measurements Local-frame measurements (possibly for multiple
  *        beacons; each is binned into `measurement.beacon`).
@@ -420,25 +420,20 @@ double trajectory_spread(const std::vector<LocalFrameMeasurement>& measurements,
     return spread;
 }
 
-/**
- * @brief Lightweight variant of local_observability_metrics() that returns
- * only the two fields most sweeps need: the observability rank (count of
- * singular values above a relative threshold `max(1e-6, sigma_max*1e-7)`)
- * and, when full rank 5 is achieved, the smallest singular value
- * (the paper's S_v). When rank < 5, sigma_min is reported as 0.0 rather
- * than a meaningless near-zero value, since a gauge-degenerate direction
- * exists (e.g. from a stationary or collinear trajectory) and no singular
- * value meaningfully bounds the estimator's conditioning.
- *
- * @return {rank, sigma_min}; sigma_min is 0.0 whenever rank != 5.
- */
+}  // namespace
+
+// See Simulation.hpp for the full contract. Exported (rather than kept
+// file-private) because the ROS 2 / Gazebo closed-loop node logs the same
+// conditioning diagnostic the batch simulator does. The default noise
+// argument lives on the header declaration.
 std::pair<int, double> local_observability_rank_and_sigma_min(
     const std::vector<double>& state,
     const std::vector<Vec2>& path,
-    const std::vector<LocalFrameMeasurement>& measurements) {
+    const std::vector<LocalFrameMeasurement>& measurements,
+    const Noise& noise) {
     const auto metrics = [&]() {
         const auto eigenvalues = jacobi_eigenvalues(
-            normal_matrix_for_local_observability(state, path, measurements));
+            normal_matrix_for_local_observability(state, path, measurements, noise));
         const double largest = std::sqrt(eigenvalues.back());
         const double threshold = std::max(1e-6, largest * 1e-7);
         int rank = 0;
@@ -458,6 +453,8 @@ std::pair<int, double> local_observability_rank_and_sigma_min(
     }();
     return metrics;
 }
+
+namespace {
 
 /**
  * @brief Full local-observability/Fisher-information diagnostic for a
@@ -1657,20 +1654,32 @@ ClosedLoopResult run_closed_loop_comparison(
                 target_estimate, beacon_count, global_measurements);
         }
 
-        // Excitation-supervised gate (Algorithm 1, CDC closed-loop paper):
-        // if the recent trajectory is under-excited (low spread) or the
-        // single-beacon local observability is rank-deficient or has a
-        // small sigma_min, retrigger the excitation epoch (resets the decay
-        // clock below) instead of letting the fixed schedule keep decaying.
+        // Accumulated spread of the stored window, computed from the known
+        // measurement poses -- exactly the noiseless certificate S_v the
+        // theory supervises on (see Math.hpp's path_spread). Logged every
+        // step, for every excitation mode, so the paper's S_v traces plot
+        // the same quantity the supervisor acts on.
+        const double window_spread = path_spread(path);
+        // Conditioning diagnostic (never a control trigger): sigma_min of the
+        // whitened stacked Jacobian at the current estimate, whitened with
+        // the actual closed-loop noise sigmas. Only defined for the 1-beacon
+        // scenario-1 model this diagnostic is scoped to.
+        double sigma_min_diagnostic = -1.0;
+        if (scenario == 1 && beacon_count == 1) {
+            sigma_min_diagnostic = local_observability_rank_and_sigma_min(
+                state1, path, local_measurements, config.closed_loop_noise).second;
+        }
+
         bool retriggered = false;
         if (excitation_mode == ClosedLoopExcitationMode::Supervised) {
-            const auto observability =
-                local_observability_rank_and_sigma_min(state1, path, local_measurements);
-            const double spread = trajectory_spread(local_measurements, beacon_count);
-            const bool under_excited = spread < config.supervised_spread_threshold;
-            const bool under_conditioned =
-                observability.first < 5 || observability.second < config.supervised_sigma_min_threshold;
-            if (under_excited || under_conditioned) {
+            // Spread-only supervision (Algorithm 1): retrigger the excitation
+            // epoch while the stored window's spread is below the accuracy-
+            // driven threshold S_bar. S_v is computed from the known poses,
+            // so this trigger is exactly the certificate covered by the
+            // finite-acquisition proposition; conditioning (sigma_min) is
+            // reported as a diagnostic but deliberately not a trigger, since
+            // the acquisition guarantee does not cover a second threshold.
+            if (window_spread < config.supervised_spread_threshold) {
                 excitation_epoch = step;
                 retriggered = true;
             }
@@ -1723,6 +1732,9 @@ ClosedLoopResult run_closed_loop_comparison(
         point.beacon_position_rmse = beacon_position_rmse(world, beacon_estimates);
         point.beacon_yaw_rmse = scenario == 1 ? beacon_yaw_rmse(world, beacon_estimates) : -1.0;
         point.cost = current_cost;
+        point.spread = window_spread;
+        point.sigma_min = sigma_min_diagnostic;
+        point.excitation_norm2 = dot(excitation, excitation);
         point.retriggered = retriggered;
         points.push_back(point);
     }
@@ -1850,10 +1862,207 @@ std::vector<SupervisedExcitationComparisonRow> run_supervised_excitation_compari
     return rows;
 }
 
+namespace {
+
+/**
+ * @brief Across-trial RMSE of a batch of scalar errors:
+ * sqrt((1/M) sum e_j^2). This is the statistic the design rule
+ * var(psi_hat) ~ sigma^2 / S_v predicts (a population RMS level, not a
+ * per-trial bound and not a mean absolute error), so the Monte Carlo tables
+ * report it directly.
+ */
+double batch_rmse(const std::vector<double>& values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    double sum2 = 0.0;
+    for (double value : values) {
+        sum2 += value * value;
+    }
+    return std::sqrt(sum2 / static_cast<double>(values.size()));
+}
+
+/**
+ * @brief Percentile-bootstrap 95% confidence interval for batch_rmse():
+ * resamples the trial errors with replacement B times and takes the
+ * 2.5th/97.5th percentiles of the resampled RMSEs. The bootstrap RNG is
+ * seeded from a fixed constant (independent of the simulation seeds), so
+ * the CI is deterministic; index selection uses rng() % n, whose modulo
+ * bias is negligible for n on the order of 10^2 against a 32-bit engine.
+ */
+std::pair<double, double> bootstrap_rmse_ci95(const std::vector<double>& values) {
+    if (values.size() < 2) {
+        const double point = batch_rmse(values);
+        return {point, point};
+    }
+    constexpr int kResamples = 2000;
+    constexpr unsigned int kBootstrapSeed = 987654321U;
+    std::mt19937 rng(kBootstrapSeed);
+    const std::size_t n = values.size();
+    std::vector<double> resampled_rmse;
+    resampled_rmse.reserve(kResamples);
+    for (int b = 0; b < kResamples; ++b) {
+        double sum2 = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const double value = values[rng() % n];
+            sum2 += value * value;
+        }
+        resampled_rmse.push_back(std::sqrt(sum2 / static_cast<double>(n)));
+    }
+    std::sort(resampled_rmse.begin(), resampled_rmse.end());
+    const std::size_t lo_index = static_cast<std::size_t>(0.025 * (kResamples - 1));
+    const std::size_t hi_index = static_cast<std::size_t>(0.975 * (kResamples - 1));
+    return {resampled_rmse[lo_index], resampled_rmse[hi_index]};
+}
+
+/** @brief Arithmetic mean of `values` (0.0 for an empty batch). */
+double batch_mean(const std::vector<double>& values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    double sum = 0.0;
+    for (double value : values) {
+        sum += value;
+    }
+    return sum / static_cast<double>(values.size());
+}
+
+/** @brief Normal-approximation 95% CI half-width for the mean of `values`. */
+double batch_mean_ci95(const std::vector<double>& values) {
+    if (values.size() < 2) {
+        return 0.0;
+    }
+    const double mean = batch_mean(values);
+    double sum2 = 0.0;
+    for (double value : values) {
+        sum2 += (value - mean) * (value - mean);
+    }
+    const double variance = sum2 / static_cast<double>(values.size() - 1);
+    return 1.96 * std::sqrt(variance / static_cast<double>(values.size()));
+}
+
+/**
+ * @brief Collects per-trial outcomes for one excitation policy across a
+ * Monte Carlo batch of closed-loop runs; the run_supervised_* aggregators
+ * below turn these samples into RMSEs with bootstrap CIs and success rates.
+ */
+struct ClosedLoopBatchSamples {
+    std::vector<double> final_goal_errors;
+    std::vector<double> final_target_errors;
+    std::vector<double> final_beacon_position_rmses;
+    std::vector<double> final_beacon_yaw_rmses;
+    // Packets needed to first cross the goal-error threshold, over the
+    // trials that reached it at all: the time-to-accuracy statistic that
+    // separates guaranteed excitation acquisition (supervised) from relying
+    // on estimate-jitter-driven wander to self-excite (fixed schedule).
+    std::vector<double> steps_to_goal;
+    // Packets needed for the stored window's spread to first reach the
+    // supervisor's threshold, over the trials that reached it.
+    std::vector<double> packets_to_threshold;
+    // Per-trial count of underexcited (retriggered) packets, and of
+    // excitation episodes (maximal runs of consecutive retriggered packets).
+    std::vector<double> retrigger_counts;
+    std::vector<double> episode_counts;
+    // Per-trial traveled path length and integrated excitation effort
+    // sum_k ||u_k^exp||^2 * dt.
+    std::vector<double> path_lengths;
+    std::vector<double> excitation_efforts;
+    int count = 0;
+
+    void add(const ClosedLoopResult& result, double goal_threshold, double spread_threshold,
+             double dt) {
+        if (result.points.empty()) {
+            return;
+        }
+        const auto& final_point = result.points.back();
+        final_goal_errors.push_back(final_point.goal_error);
+        final_target_errors.push_back(final_point.target_error);
+        final_beacon_position_rmses.push_back(final_point.beacon_position_rmse);
+        final_beacon_yaw_rmses.push_back(final_point.beacon_yaw_rmse);
+
+        int retriggers = 0;
+        int episodes = 0;
+        bool previous_retriggered = false;
+        double path_length = 0.0;
+        double effort = 0.0;
+        bool goal_recorded = false;
+        bool threshold_recorded = false;
+        for (std::size_t i = 0; i < result.points.size(); ++i) {
+            const auto& point = result.points[i];
+            if (point.retriggered) {
+                ++retriggers;
+                if (!previous_retriggered) {
+                    ++episodes;
+                }
+            }
+            previous_retriggered = point.retriggered;
+            if (i > 0) {
+                path_length += norm(point.robot - result.points[i - 1].robot);
+            }
+            effort += point.excitation_norm2 * dt;
+            if (!goal_recorded && point.goal_error < goal_threshold) {
+                steps_to_goal.push_back(static_cast<double>(point.step));
+                goal_recorded = true;
+            }
+            if (!threshold_recorded && point.spread >= spread_threshold) {
+                packets_to_threshold.push_back(static_cast<double>(point.step));
+                threshold_recorded = true;
+            }
+        }
+        retrigger_counts.push_back(static_cast<double>(retriggers));
+        episode_counts.push_back(static_cast<double>(episodes));
+        path_lengths.push_back(path_length);
+        excitation_efforts.push_back(effort);
+        ++count;
+    }
+
+    /// Fraction of trials whose final value of `values` is strictly below
+    /// (or, for `or_equal`, at or below) `threshold`.
+    static double success_rate(const std::vector<double>& values, double threshold,
+                               bool or_equal = false) {
+        if (values.empty()) {
+            return 0.0;
+        }
+        int successes = 0;
+        for (double value : values) {
+            if (or_equal ? value <= threshold : value < threshold) {
+                ++successes;
+            }
+        }
+        return static_cast<double>(successes) / static_cast<double>(values.size());
+    }
+
+    double reached_rate(const std::vector<double>& reached) const {
+        return count > 0 ? static_cast<double>(reached.size()) / static_cast<double>(count) : 0.0;
+    }
+};
+
+// The paper's declared yaw-accuracy success criterion. Success rates count
+// trials whose final beacon-yaw error is at or below this level; it is held
+// fixed across the threshold ablation so success measures the same accuracy
+// at every S_bar (the design rule then predicts which thresholds meet it).
+constexpr double kYawSuccessThresholdRad = 0.05;
+
+/**
+ * @brief The design rule's population yaw-RMSE prediction eps_psi = sigma /
+ * sqrt(S_bar) (Remark on accuracy-driven threshold selection): choosing
+ * S_bar = sigma^2 / eps_psi^2 targets an across-trial yaw RMSE of eps_psi.
+ * At the default S_bar = 0.16 and closed-loop range sigma = 0.02 m this
+ * equals the 0.05-rad success criterion above, so the primary experiment's
+ * threshold is selected to deliver exactly the accuracy the experiments
+ * declare as success.
+ */
+double predicted_yaw_rmse(double range_sigma, double spread_threshold) {
+    return range_sigma / std::sqrt(std::max(spread_threshold, 1e-12));
+}
+
+}  // namespace
+
 // See Simulation.hpp for the full contract.
 std::vector<SupervisedLambdaSweepRow> run_supervised_lambda_sweep(
     const SimulationConfig& config) {
     const std::vector<double> lambdas{0.02, 0.05, 0.10, 0.25, 0.50, 1.0, 2.0};
+    const int trials = std::max(1, config.supervised_monte_carlo_trials);
 
     std::vector<SupervisedLambdaSweepRow> rows;
     rows.reserve(lambdas.size());
@@ -1861,39 +2070,217 @@ std::vector<SupervisedLambdaSweepRow> run_supervised_lambda_sweep(
         // Same no-transient scenario as the underexcited comparison: the
         // robot starts at the true target, so only the excitation schedule
         // can excite the geometry, and lambda controls how quickly the
-        // fixed schedule gives up.
+        // fixed schedule gives up. Paired Monte Carlo: per trial, the fixed
+        // and supervised policies consume the same seed, so per-trial
+        // differences are attributable to the policy rather than the noise
+        // realization.
         SimulationConfig sweep_config = config;
         sweep_config.exploration_decay = lambda;
         sweep_config.initial_target_estimate = {1.2, -0.75};
         sweep_config.initial_robot = sweep_config.initial_target_estimate;
 
-        std::mt19937 fixed_rng(sweep_config.closed_loop_seed + kFixedVsSupervisedSeedBase);
-        const auto fixed = run_closed_loop_comparison(
-            1, 1, sweep_config, fixed_rng, ClosedLoopExcitationMode::Circular);
+        ClosedLoopBatchSamples fixed_samples;
+        ClosedLoopBatchSamples supervised_samples;
+        for (int trial = 0; trial < trials; ++trial) {
+            const unsigned int seed = sweep_config.closed_loop_seed +
+                kFixedVsSupervisedSeedBase + static_cast<unsigned int>(trial);
 
-        std::mt19937 supervised_rng(sweep_config.closed_loop_seed + kFixedVsSupervisedSeedBase);
-        const auto supervised = run_closed_loop_comparison(
-            1, 1, sweep_config, supervised_rng, ClosedLoopExcitationMode::Supervised);
+            std::mt19937 fixed_rng(seed);
+            const auto fixed = run_closed_loop_comparison(
+                1, 1, sweep_config, fixed_rng, ClosedLoopExcitationMode::Circular);
+            fixed_samples.add(fixed, config.supervised_goal_error_threshold,
+                              config.supervised_spread_threshold, config.closed_loop_dt);
+
+            std::mt19937 supervised_rng(seed);
+            const auto supervised = run_closed_loop_comparison(
+                1, 1, sweep_config, supervised_rng, ClosedLoopExcitationMode::Supervised);
+            supervised_samples.add(supervised, config.supervised_goal_error_threshold,
+                                   config.supervised_spread_threshold, config.closed_loop_dt);
+        }
 
         SupervisedLambdaSweepRow row;
         row.lambda = lambda;
-        for (const auto& point : supervised.points) {
-            if (point.retriggered) {
-                ++row.supervised_retrigger_count;
-            }
+        row.trials = trials;
+        row.supervised_mean_retrigger_count = batch_mean(supervised_samples.retrigger_counts);
+
+        row.fixed_target_rmse = batch_rmse(fixed_samples.final_target_errors);
+        std::tie(row.fixed_target_rmse_ci_lo, row.fixed_target_rmse_ci_hi) =
+            bootstrap_rmse_ci95(fixed_samples.final_target_errors);
+        row.fixed_beacon_position_rmse = batch_rmse(fixed_samples.final_beacon_position_rmses);
+        std::tie(row.fixed_beacon_position_rmse_ci_lo, row.fixed_beacon_position_rmse_ci_hi) =
+            bootstrap_rmse_ci95(fixed_samples.final_beacon_position_rmses);
+        row.fixed_beacon_yaw_rmse = batch_rmse(fixed_samples.final_beacon_yaw_rmses);
+        std::tie(row.fixed_beacon_yaw_rmse_ci_lo, row.fixed_beacon_yaw_rmse_ci_hi) =
+            bootstrap_rmse_ci95(fixed_samples.final_beacon_yaw_rmses);
+        row.fixed_yaw_success_rate = ClosedLoopBatchSamples::success_rate(
+            fixed_samples.final_beacon_yaw_rmses, kYawSuccessThresholdRad, true);
+
+        row.supervised_target_rmse = batch_rmse(supervised_samples.final_target_errors);
+        std::tie(row.supervised_target_rmse_ci_lo, row.supervised_target_rmse_ci_hi) =
+            bootstrap_rmse_ci95(supervised_samples.final_target_errors);
+        row.supervised_beacon_position_rmse =
+            batch_rmse(supervised_samples.final_beacon_position_rmses);
+        std::tie(row.supervised_beacon_position_rmse_ci_lo,
+                 row.supervised_beacon_position_rmse_ci_hi) =
+            bootstrap_rmse_ci95(supervised_samples.final_beacon_position_rmses);
+        row.supervised_beacon_yaw_rmse = batch_rmse(supervised_samples.final_beacon_yaw_rmses);
+        std::tie(row.supervised_beacon_yaw_rmse_ci_lo, row.supervised_beacon_yaw_rmse_ci_hi) =
+            bootstrap_rmse_ci95(supervised_samples.final_beacon_yaw_rmses);
+        row.supervised_yaw_success_rate = ClosedLoopBatchSamples::success_rate(
+            supervised_samples.final_beacon_yaw_rmses, kYawSuccessThresholdRad, true);
+        rows.push_back(row);
+    }
+    return rows;
+}
+
+// Seed base for the target-seeking comparison's Monte Carlo batch; distinct
+// from the other sweeps' bases purely to keep unrelated RNG streams
+// decorrelated. Both policies in a pair share the same per-trial seed.
+constexpr unsigned int kSeekingComparisonSeedBase = 400U;
+
+// See Simulation.hpp for the full contract.
+std::vector<SupervisedSeekingComparisonRow> run_supervised_seeking_comparison(
+    const SimulationConfig& config) {
+    const int trials = std::max(1, config.supervised_monte_carlo_trials);
+
+    // Nontrivial target-seeking scenario: the vehicle starts AT the wrong
+    // initial target estimate (both at the origin, ~1.4 m from the true
+    // target), so the seeking term -k(q - p_hat) is initially quiescent and
+    // produces no exploratory transient of its own. Only the excitation
+    // policy can generate the trajectory spread needed to calibrate the
+    // relay, and without calibration the target estimate -- and hence the
+    // vehicle -- never moves to the true target. Target-seeking success is
+    // therefore genuinely contingent on the excitation policy here, unlike
+    // the decay sweep's calibration-isolation scenario where the vehicle
+    // already sits at the target. The fast decay makes the fixed schedule's
+    // excitation budget inadequate unless it happens to suffice by luck.
+    SimulationConfig seeking_config = config;
+    seeking_config.exploration_decay = 2.0;
+    seeking_config.initial_target_estimate = {0.0, 0.0};
+    seeking_config.initial_robot = seeking_config.initial_target_estimate;
+
+    ClosedLoopBatchSamples fixed_samples;
+    ClosedLoopBatchSamples supervised_samples;
+    for (int trial = 0; trial < trials; ++trial) {
+        const unsigned int seed = seeking_config.closed_loop_seed +
+            kSeekingComparisonSeedBase + static_cast<unsigned int>(trial);
+
+        std::mt19937 fixed_rng(seed);
+        const auto fixed = run_closed_loop_comparison(
+            1, 1, seeking_config, fixed_rng, ClosedLoopExcitationMode::Circular);
+        fixed_samples.add(fixed, config.supervised_goal_error_threshold,
+                          config.supervised_spread_threshold, config.closed_loop_dt);
+
+        std::mt19937 supervised_rng(seed);
+        const auto supervised = run_closed_loop_comparison(
+            1, 1, seeking_config, supervised_rng, ClosedLoopExcitationMode::Supervised);
+        supervised_samples.add(supervised, config.supervised_goal_error_threshold,
+                               config.supervised_spread_threshold, config.closed_loop_dt);
+    }
+
+    const auto make_row = [&](const std::string& name, const ClosedLoopBatchSamples& samples) {
+        SupervisedSeekingComparisonRow row;
+        row.excitation = name;
+        row.trials = samples.count;
+        row.mean_retrigger_count = batch_mean(samples.retrigger_counts);
+        row.goal_success_rate = ClosedLoopBatchSamples::success_rate(
+            samples.final_goal_errors, config.supervised_goal_error_threshold);
+        row.target_success_rate = ClosedLoopBatchSamples::success_rate(
+            samples.final_target_errors, config.supervised_target_error_threshold);
+        row.yaw_success_rate = ClosedLoopBatchSamples::success_rate(
+            samples.final_beacon_yaw_rmses, kYawSuccessThresholdRad, true);
+        row.goal_reached_rate = samples.reached_rate(samples.steps_to_goal);
+        row.steps_to_goal_mean =
+            samples.steps_to_goal.empty() ? -1.0 : batch_mean(samples.steps_to_goal);
+        row.steps_to_goal_ci95 = batch_mean_ci95(samples.steps_to_goal);
+        row.final_goal_rmse = batch_rmse(samples.final_goal_errors);
+        std::tie(row.final_goal_rmse_ci_lo, row.final_goal_rmse_ci_hi) =
+            bootstrap_rmse_ci95(samples.final_goal_errors);
+        row.final_target_rmse = batch_rmse(samples.final_target_errors);
+        std::tie(row.final_target_rmse_ci_lo, row.final_target_rmse_ci_hi) =
+            bootstrap_rmse_ci95(samples.final_target_errors);
+        row.final_beacon_position_rmse = batch_rmse(samples.final_beacon_position_rmses);
+        std::tie(row.final_beacon_position_rmse_ci_lo, row.final_beacon_position_rmse_ci_hi) =
+            bootstrap_rmse_ci95(samples.final_beacon_position_rmses);
+        row.final_beacon_yaw_rmse = batch_rmse(samples.final_beacon_yaw_rmses);
+        std::tie(row.final_beacon_yaw_rmse_ci_lo, row.final_beacon_yaw_rmse_ci_hi) =
+            bootstrap_rmse_ci95(samples.final_beacon_yaw_rmses);
+        return row;
+    };
+
+    return {
+        make_row("decaying_circular", fixed_samples),
+        make_row("excitation_supervised", supervised_samples),
+    };
+}
+
+// Seed base for the spread-threshold ablation's Monte Carlo batch; distinct
+// from the other supervised sweeps' bases purely to keep unrelated RNG
+// streams decorrelated.
+constexpr unsigned int kThresholdAblationSeedBase = 500U;
+
+// See Simulation.hpp for the full contract.
+std::vector<SupervisedThresholdAblationRow> run_supervised_threshold_ablation(
+    const SimulationConfig& config) {
+    // Candidate thresholds bracketing the primary S_bar = 0.16 setting: the
+    // loose 0.05 (design-rule accuracy 0.089 rad), the accuracy-matched
+    // 0.16 (0.05 rad, the declared success criterion), an intermediate 1.0
+    // (0.02 rad), and the paper's high-precision budget example 9.04
+    // (0.0067 rad). The trial success criterion stays fixed at 0.05 rad
+    // throughout, so the sweep shows what each threshold buys -- and costs
+    // -- at the same declared accuracy.
+    const std::vector<double> thresholds{0.05, 0.16, 1.0, 9.04};
+    const int trials = std::max(1, config.supervised_monte_carlo_trials);
+
+    std::vector<SupervisedThresholdAblationRow> rows;
+    rows.reserve(thresholds.size());
+    for (double threshold : thresholds) {
+        // Understimulated scenario with the fast decay: the robot starts at
+        // the true target with a correct initial estimate, so essentially
+        // all excitation is supervisor-commanded and the per-threshold cost
+        // columns (path length, effort, underexcited packets) measure the
+        // supervisor's own demand rather than seeking transients.
+        SimulationConfig ablation_config = config;
+        ablation_config.exploration_decay = 2.0;
+        ablation_config.initial_target_estimate = {1.2, -0.75};
+        ablation_config.initial_robot = ablation_config.initial_target_estimate;
+        ablation_config.supervised_spread_threshold = threshold;
+
+        ClosedLoopBatchSamples samples;
+        for (int trial = 0; trial < trials; ++trial) {
+            const unsigned int seed = ablation_config.closed_loop_seed +
+                kThresholdAblationSeedBase + static_cast<unsigned int>(trial);
+            std::mt19937 rng(seed);
+            const auto result = run_closed_loop_comparison(
+                1, 1, ablation_config, rng, ClosedLoopExcitationMode::Supervised);
+            samples.add(result, config.supervised_goal_error_threshold, threshold,
+                        config.closed_loop_dt);
         }
-        if (!fixed.points.empty()) {
-            const auto& fixed_final = fixed.points.back();
-            row.fixed_final_target_error = fixed_final.target_error;
-            row.fixed_final_beacon_position_rmse = fixed_final.beacon_position_rmse;
-            row.fixed_final_beacon_yaw_rmse = fixed_final.beacon_yaw_rmse;
-        }
-        if (!supervised.points.empty()) {
-            const auto& supervised_final = supervised.points.back();
-            row.supervised_final_target_error = supervised_final.target_error;
-            row.supervised_final_beacon_position_rmse = supervised_final.beacon_position_rmse;
-            row.supervised_final_beacon_yaw_rmse = supervised_final.beacon_yaw_rmse;
-        }
+
+        SupervisedThresholdAblationRow row;
+        row.spread_threshold = threshold;
+        row.trials = trials;
+        row.predicted_yaw_rmse =
+            predicted_yaw_rmse(config.closed_loop_noise.range_sigma, threshold);
+        row.yaw_rmse = batch_rmse(samples.final_beacon_yaw_rmses);
+        std::tie(row.yaw_rmse_ci_lo, row.yaw_rmse_ci_hi) =
+            bootstrap_rmse_ci95(samples.final_beacon_yaw_rmses);
+        row.yaw_success_rate = ClosedLoopBatchSamples::success_rate(
+            samples.final_beacon_yaw_rmses, kYawSuccessThresholdRad, true);
+        row.threshold_reached_rate = samples.reached_rate(samples.packets_to_threshold);
+        row.packets_to_threshold_mean =
+            samples.packets_to_threshold.empty() ? -1.0 : batch_mean(samples.packets_to_threshold);
+        row.packets_to_threshold_ci95 = batch_mean_ci95(samples.packets_to_threshold);
+        row.mean_retrigger_count = batch_mean(samples.retrigger_counts);
+        row.mean_episode_count = batch_mean(samples.episode_counts);
+        row.mean_path_length = batch_mean(samples.path_lengths);
+        row.mean_excitation_effort = batch_mean(samples.excitation_efforts);
+        row.target_rmse = batch_rmse(samples.final_target_errors);
+        std::tie(row.target_rmse_ci_lo, row.target_rmse_ci_hi) =
+            bootstrap_rmse_ci95(samples.final_target_errors);
+        row.beacon_position_rmse = batch_rmse(samples.final_beacon_position_rmses);
+        std::tie(row.beacon_position_rmse_ci_lo, row.beacon_position_rmse_ci_hi) =
+            bootstrap_rmse_ci95(samples.final_beacon_position_rmses);
         rows.push_back(row);
     }
     return rows;

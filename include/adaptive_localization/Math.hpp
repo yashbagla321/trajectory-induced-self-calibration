@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <random>
+#include <vector>
 
 namespace adaptive {
 
@@ -108,6 +109,33 @@ inline double sample_noise(double sigma, std::mt19937& rng) {
     }
     std::normal_distribution<double> distribution(0.0, sigma);
     return distribution(rng);
+}
+
+/**
+ * Trajectory spread S_v = sum_k ||q_k - q_bar||^2 computed directly from the
+ * known vehicle poses at which measurements were taken. This is exactly the
+ * certificate the theory defines (in the noiseless model S_v over local
+ * vectors equals the spread of the global poses, and the vehicle path is
+ * known by assumption), so it is 0 at a stationary pose regardless of
+ * measurement noise. The excitation supervisor triggers on THIS quantity --
+ * both in the batch simulator and in the ROS 2 / Gazebo closed-loop node,
+ * which share this implementation.
+ */
+inline double path_spread(const std::vector<Vec2>& path) {
+    if (path.empty()) {
+        return 0.0;
+    }
+    Vec2 sum;
+    for (const auto& pose : path) {
+        sum = sum + pose;
+    }
+    const Vec2 mean = sum / static_cast<double>(path.size());
+    double spread = 0.0;
+    for (const auto& pose : path) {
+        const Vec2 centered = pose - mean;
+        spread += dot(centered, centered);
+    }
+    return spread;
 }
 
 }  // namespace adaptive
