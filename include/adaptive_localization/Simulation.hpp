@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <random>
 #include <vector>
 
@@ -21,6 +22,18 @@
  */
 
 namespace adaptive {
+
+/**
+ * @brief Eigenvalues (ascending) of a symmetric 5x5 matrix via the cyclic
+ * Jacobi algorithm; see Simulation.cpp for the full algorithm description.
+ * Exposed here (rather than kept file-private) so it is directly testable
+ * against matrices with known closed-form eigenvalues; its only production
+ * caller remains within Simulation.cpp's local-observability diagnostics.
+ *
+ * @param a Row-major flattened symmetric 5x5 matrix.
+ * @return The 5 eigenvalues in ascending order.
+ */
+std::array<double, 5> jacobi_eigenvalues(std::array<double, 25> a);
 
 /**
  * @brief Selects the excitation policy used by the animated closed-loop

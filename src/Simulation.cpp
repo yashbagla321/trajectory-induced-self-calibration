@@ -35,6 +35,92 @@
 
 namespace adaptive {
 
+/**
+ * @brief Computes the eigenvalues of a symmetric 5x5 matrix via the
+ * classic cyclic Jacobi eigenvalue algorithm: repeatedly finds the largest
+ * off-diagonal entry and zeroes it with a Givens/Jacobi rotation, for up to
+ * 80 sweeps or until all off-diagonal entries are negligible (< 1e-10).
+ * Eigenvalues are clamped to be non-negative (the normal matrix is PSD in
+ * exact arithmetic; small negative numerical noise is floored to 0) and
+ * returned sorted ascending. Used to diagonalize the normal matrix from
+ * normal_matrix_for_local_observability(); sqrt(eigenvalue) gives the
+ * corresponding singular value of the Jacobian.
+ *
+ * Declared in Simulation.hpp (rather than kept file-private) so it can be
+ * exercised directly by tests/jacobi_eigenvalues_test.cpp against matrices
+ * with known closed-form eigenvalues, independent of the Monte Carlo sweeps
+ * that are its only other caller.
+ *
+ * @param a Row-major flattened symmetric 5x5 matrix (passed by value since
+ *        the algorithm mutates it in place as it rotates).
+ * @return The 5 eigenvalues in ascending order.
+ */
+std::array<double, 5> jacobi_eigenvalues(std::array<double, 25> a) {
+    constexpr int n = 5;
+    for (int sweep = 0; sweep < 80; ++sweep) {
+        // Find the largest-magnitude off-diagonal entry (p, q); this is the
+        // pair the next Jacobi rotation will annihilate.
+        int p = 0;
+        int q = 1;
+        double max_offdiag = 0.0;
+        for (int i = 0; i < n; ++i) {
+            for (int j = i + 1; j < n; ++j) {
+                const double value = std::abs(a[static_cast<std::size_t>(i * n + j)]);
+                if (value > max_offdiag) {
+                    max_offdiag = value;
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+        if (max_offdiag < 1e-10) {
+            // Off-diagonal entries are all negligible: the matrix is
+            // effectively diagonal already, so the diagonal holds the
+            // eigenvalues and we can stop early.
+            break;
+        }
+
+        // Rotation angle that zeroes a[p][q]/a[q][p] (standard 2x2 Jacobi
+        // rotation formula), then apply the rotation to rows/columns p, q.
+        const double app = a[static_cast<std::size_t>(p * n + p)];
+        const double aqq = a[static_cast<std::size_t>(q * n + q)];
+        const double apq = a[static_cast<std::size_t>(p * n + q)];
+        const double angle = 0.5 * std::atan2(2.0 * apq, aqq - app);
+        const double c = std::cos(angle);
+        const double s = std::sin(angle);
+
+        for (int k = 0; k < n; ++k) {
+            if (k == p || k == q) {
+                continue;
+            }
+            const double akp = a[static_cast<std::size_t>(k * n + p)];
+            const double akq = a[static_cast<std::size_t>(k * n + q)];
+            const double new_kp = c * akp - s * akq;
+            const double new_kq = s * akp + c * akq;
+            a[static_cast<std::size_t>(k * n + p)] = new_kp;
+            a[static_cast<std::size_t>(p * n + k)] = new_kp;
+            a[static_cast<std::size_t>(k * n + q)] = new_kq;
+            a[static_cast<std::size_t>(q * n + k)] = new_kq;
+        }
+
+        a[static_cast<std::size_t>(p * n + p)] = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+        a[static_cast<std::size_t>(q * n + q)] = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+        a[static_cast<std::size_t>(p * n + q)] = 0.0;
+        a[static_cast<std::size_t>(q * n + p)] = 0.0;
+    }
+
+    // After convergence (or the sweep cap), the diagonal holds the
+    // eigenvalues; clamp tiny negative noise to zero and sort ascending so
+    // callers can read off sigma_min/sigma_max directly from the ends.
+    std::array<double, 5> values{};
+    for (int i = 0; i < n; ++i) {
+        values[static_cast<std::size_t>(i)] =
+            std::max(0.0, a[static_cast<std::size_t>(i * n + i)]);
+    }
+    std::sort(values.begin(), values.end());
+    return values;
+}
+
 namespace {
 
 /**
@@ -87,16 +173,6 @@ struct MeasurementStress {
     double fov_half_angle = 0.0;
     bool use_fov = false;
 };
-
-/** @brief Draws one zero-mean Gaussian noise sample with std-dev `sigma`,
- *  or exactly 0.0 when `sigma <= 0` (treated as noiseless). */
-double sample_noise(double sigma, std::mt19937& rng) {
-    if (sigma <= 0.0) {
-        return 0.0;
-    }
-    std::normal_distribution<double> distribution(0.0, sigma);
-    return distribution(rng);
-}
 
 /**
  * @brief Generates one noisy CoreMeasurement per beacon for the
@@ -342,87 +418,6 @@ double trajectory_spread(const std::vector<LocalFrameMeasurement>& measurements,
         spread += dot(centered, centered);
     }
     return spread;
-}
-
-/**
- * @brief Computes the eigenvalues of a symmetric 5x5 matrix via the
- * classic cyclic Jacobi eigenvalue algorithm: repeatedly finds the largest
- * off-diagonal entry and zeroes it with a Givens/Jacobi rotation, for up to
- * 80 sweeps or until all off-diagonal entries are negligible (< 1e-10).
- * Eigenvalues are clamped to be non-negative (the normal matrix is PSD in
- * exact arithmetic; small negative numerical noise is floored to 0) and
- * returned sorted ascending. Used to diagonalize the normal matrix from
- * normal_matrix_for_local_observability(); sqrt(eigenvalue) gives the
- * corresponding singular value of the Jacobian.
- *
- * @param a Row-major flattened symmetric 5x5 matrix (passed by value since
- *        the algorithm mutates it in place as it rotates).
- * @return The 5 eigenvalues in ascending order.
- */
-std::array<double, 5> jacobi_eigenvalues(std::array<double, 25> a) {
-    constexpr int n = 5;
-    for (int sweep = 0; sweep < 80; ++sweep) {
-        // Find the largest-magnitude off-diagonal entry (p, q); this is the
-        // pair the next Jacobi rotation will annihilate.
-        int p = 0;
-        int q = 1;
-        double max_offdiag = 0.0;
-        for (int i = 0; i < n; ++i) {
-            for (int j = i + 1; j < n; ++j) {
-                const double value = std::abs(a[static_cast<std::size_t>(i * n + j)]);
-                if (value > max_offdiag) {
-                    max_offdiag = value;
-                    p = i;
-                    q = j;
-                }
-            }
-        }
-        if (max_offdiag < 1e-10) {
-            // Off-diagonal entries are all negligible: the matrix is
-            // effectively diagonal already, so the diagonal holds the
-            // eigenvalues and we can stop early.
-            break;
-        }
-
-        // Rotation angle that zeroes a[p][q]/a[q][p] (standard 2x2 Jacobi
-        // rotation formula), then apply the rotation to rows/columns p, q.
-        const double app = a[static_cast<std::size_t>(p * n + p)];
-        const double aqq = a[static_cast<std::size_t>(q * n + q)];
-        const double apq = a[static_cast<std::size_t>(p * n + q)];
-        const double angle = 0.5 * std::atan2(2.0 * apq, aqq - app);
-        const double c = std::cos(angle);
-        const double s = std::sin(angle);
-
-        for (int k = 0; k < n; ++k) {
-            if (k == p || k == q) {
-                continue;
-            }
-            const double akp = a[static_cast<std::size_t>(k * n + p)];
-            const double akq = a[static_cast<std::size_t>(k * n + q)];
-            const double new_kp = c * akp - s * akq;
-            const double new_kq = s * akp + c * akq;
-            a[static_cast<std::size_t>(k * n + p)] = new_kp;
-            a[static_cast<std::size_t>(p * n + k)] = new_kp;
-            a[static_cast<std::size_t>(k * n + q)] = new_kq;
-            a[static_cast<std::size_t>(q * n + k)] = new_kq;
-        }
-
-        a[static_cast<std::size_t>(p * n + p)] = c * c * app - 2.0 * s * c * apq + s * s * aqq;
-        a[static_cast<std::size_t>(q * n + q)] = s * s * app + 2.0 * s * c * apq + c * c * aqq;
-        a[static_cast<std::size_t>(p * n + q)] = 0.0;
-        a[static_cast<std::size_t>(q * n + p)] = 0.0;
-    }
-
-    // After convergence (or the sweep cap), the diagonal holds the
-    // eigenvalues; clamp tiny negative noise to zero and sort ascending so
-    // callers can read off sigma_min/sigma_max directly from the ends.
-    std::array<double, 5> values{};
-    for (int i = 0; i < n; ++i) {
-        values[static_cast<std::size_t>(i)] =
-            std::max(0.0, a[static_cast<std::size_t>(i * n + i)]);
-    }
-    std::sort(values.begin(), values.end());
-    return values;
 }
 
 /**

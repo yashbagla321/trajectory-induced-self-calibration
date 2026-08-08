@@ -11,22 +11,6 @@
 
 namespace adaptive {
 
-namespace {
-
-/// Draws one sample of zero-mean Gaussian noise with standard deviation
-/// `sigma`. Returns exactly 0.0 (no distribution constructed) when
-/// `sigma <= 0.0`, which is how the rest of the codebase represents a
-/// noiseless channel.
-double sample_noise(double sigma, std::mt19937& rng) {
-    if (sigma <= 0.0) {
-        return 0.0;
-    }
-    std::normal_distribution<double> distribution(0.0, sigma);
-    return distribution(rng);
-}
-
-}  // namespace
-
 LocalFrameMeasurement make_local_frame_measurement(
     const World& world,
     const Vec2& robot,

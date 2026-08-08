@@ -81,6 +81,31 @@ void write_json_optional_metric(std::ostream& out, double value) {
 }
 
 /**
+ * @brief Shared boilerplate for every write_*_csv row-writer below: opens `path`, writes the
+ * literal `header` (expected to end in its own "\n"), switches the stream to fixed notation at
+ * 8 decimal places (the convention every one of these writers already used), then calls
+ * `write_row(out, row)` once per element of `rows` in row order, appending a newline after each
+ * call. `write_row` is responsible only for a row's own comma-separated fields (including any
+ * write_optional_metric() calls for "not applicable" sentinel columns) -- the file open,
+ * header, precision setup, and per-row newline are handled once here instead of being repeated
+ * verbatim by every caller below.
+ */
+template <typename Row, typename RowWriter>
+void write_csv(
+    const std::filesystem::path& path,
+    const char* header,
+    const std::vector<Row>& rows,
+    RowWriter write_row) {
+    std::ofstream out(path);
+    out << header;
+    out << std::fixed << std::setprecision(8);
+    for (const auto& row : rows) {
+        write_row(out, row);
+        out << '\n';
+    }
+}
+
+/**
  * @brief Serialize a ClosedLoopResult to a single JSON object literal on `out`.
  *
  * Emits, in order: `scenario` (int), `target` ({x,y}), `beacons` (array of {x,y,yaw} in
@@ -186,23 +211,23 @@ void write_adaptive_localization_json(std::ostream& out, const AdaptiveLocalizat
  * notation at 8 decimal places; the header row is written first.
  */
 void write_summary_csv(const std::filesystem::path& path, const std::vector<SummaryRow>& rows) {
-    std::ofstream out(path);
-    out << "scenario,beacons,rmse,rmse_ci95,mean_error,mean_error_ci95,bias_x,bias_y,"
-           "success_rate,mean_cost,mean_iterations,mean_runtime_ms,"
-           "mean_beacon_position_rmse,mean_beacon_position_rmse_ci95,"
-           "mean_beacon_yaw_rmse,mean_beacon_yaw_rmse_ci95\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.scenario << ',' << row.beacons << ',' << row.rmse << ',' << row.rmse_ci95 << ','
-            << row.mean_error << ',' << row.mean_error_ci95 << ','
-            << row.bias_x << ',' << row.bias_y << ',' << row.convergence_rate << ',' << row.mean_cost << ','
-            << row.mean_iterations << ',' << row.mean_runtime_ms << ','
-            << row.mean_beacon_position_rmse << ',' << row.mean_beacon_position_rmse_ci95 << ',';
-        write_optional_metric(out, row.mean_beacon_yaw_rmse);
-        out << ',';
-        write_optional_metric(out, row.mean_beacon_yaw_rmse_ci95);
-        out << '\n';
-    }
+    write_csv(
+        path,
+        "scenario,beacons,rmse,rmse_ci95,mean_error,mean_error_ci95,bias_x,bias_y,"
+        "success_rate,mean_cost,mean_iterations,mean_runtime_ms,"
+        "mean_beacon_position_rmse,mean_beacon_position_rmse_ci95,"
+        "mean_beacon_yaw_rmse,mean_beacon_yaw_rmse_ci95\n",
+        rows,
+        [](std::ostream& out, const SummaryRow& row) {
+            out << row.scenario << ',' << row.beacons << ',' << row.rmse << ',' << row.rmse_ci95 << ','
+                << row.mean_error << ',' << row.mean_error_ci95 << ','
+                << row.bias_x << ',' << row.bias_y << ',' << row.convergence_rate << ',' << row.mean_cost << ','
+                << row.mean_iterations << ',' << row.mean_runtime_ms << ','
+                << row.mean_beacon_position_rmse << ',' << row.mean_beacon_position_rmse_ci95 << ',';
+            write_optional_metric(out, row.mean_beacon_yaw_rmse);
+            out << ',';
+            write_optional_metric(out, row.mean_beacon_yaw_rmse_ci95);
+        });
 }
 
 /**
@@ -217,18 +242,19 @@ void write_summary_csv(const std::filesystem::path& path, const std::vector<Summ
  * notation, 8 decimal places.
  */
 void write_trial_csv(const std::filesystem::path& path, const std::vector<TrialResult>& trials) {
-    std::ofstream out(path);
-    out << "scenario,beacons,trial,target_x,target_y,estimate_x,estimate_y,error,"
-           "beacon_position_rmse,beacon_yaw_rmse,cost,iterations,runtime_ms,solver_converged,success\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& t : trials) {
-        out << t.scenario << ',' << t.beacons << ',' << t.trial << ',' << t.truth.x << ',' << t.truth.y << ','
-            << t.estimate.x << ',' << t.estimate.y << ',' << t.error << ','
-            << t.beacon_position_rmse << ',';
-        write_optional_metric(out, t.beacon_yaw_rmse);
-        out << ',' << t.cost << ',' << t.iterations << ',' << t.runtime_ms << ','
-            << (t.solver_converged ? 1 : 0) << ',' << (t.converged ? 1 : 0) << '\n';
-    }
+    write_csv(
+        path,
+        "scenario,beacons,trial,target_x,target_y,estimate_x,estimate_y,error,"
+        "beacon_position_rmse,beacon_yaw_rmse,cost,iterations,runtime_ms,solver_converged,success\n",
+        trials,
+        [](std::ostream& out, const TrialResult& t) {
+            out << t.scenario << ',' << t.beacons << ',' << t.trial << ',' << t.truth.x << ',' << t.truth.y << ','
+                << t.estimate.x << ',' << t.estimate.y << ',' << t.error << ','
+                << t.beacon_position_rmse << ',';
+            write_optional_metric(out, t.beacon_yaw_rmse);
+            out << ',' << t.cost << ',' << t.iterations << ',' << t.runtime_ms << ','
+                << (t.solver_converged ? 1 : 0) << ',' << (t.converged ? 1 : 0);
+        });
 }
 
 /**
@@ -241,18 +267,19 @@ void write_trial_csv(const std::filesystem::path& path, const std::vector<TrialR
  * write_noise_robustness_svg() to plot target RMSE vs. range sigma.
  */
 void write_noise_robustness_csv(const std::filesystem::path& path, const std::vector<NoiseRobustnessRow>& rows) {
-    std::ofstream out(path);
-    out << "scenario,beacons,range_sigma,bearing_sigma,target_rmse,beacon_position_rmse,"
-           "beacon_yaw_rmse,mean_cost,mean_iterations,mean_runtime_ms,success_rate\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.scenario << ',' << row.beacons << ','
-            << row.range_sigma << ',' << row.bearing_sigma << ','
-            << row.target_rmse << ',' << row.beacon_position_rmse << ',';
-        write_optional_metric(out, row.beacon_yaw_rmse);
-        out << ',' << row.mean_cost << ',' << row.mean_iterations << ','
-            << row.mean_runtime_ms << ',' << row.convergence_rate << '\n';
-    }
+    write_csv(
+        path,
+        "scenario,beacons,range_sigma,bearing_sigma,target_rmse,beacon_position_rmse,"
+        "beacon_yaw_rmse,mean_cost,mean_iterations,mean_runtime_ms,success_rate\n",
+        rows,
+        [](std::ostream& out, const NoiseRobustnessRow& row) {
+            out << row.scenario << ',' << row.beacons << ','
+                << row.range_sigma << ',' << row.bearing_sigma << ','
+                << row.target_rmse << ',' << row.beacon_position_rmse << ',';
+            write_optional_metric(out, row.beacon_yaw_rmse);
+            out << ',' << row.mean_cost << ',' << row.mean_iterations << ','
+                << row.mean_runtime_ms << ',' << row.convergence_rate;
+        });
 }
 
 /**
@@ -265,17 +292,18 @@ void write_noise_robustness_csv(const std::filesystem::path& path, const std::ve
  * write_optional_metric().
  */
 void write_geometry_sweep_csv(const std::filesystem::path& path, const std::vector<GeometrySweepRow>& rows) {
-    std::ofstream out(path);
-    out << "beacons,beacon_separation,target_rmse,beacon_position_rmse,beacon_yaw_rmse,"
-           "mean_cost,mean_iterations,mean_runtime_ms,success_rate\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.beacons << ',' << row.beacon_separation << ','
-            << row.target_rmse << ',' << row.beacon_position_rmse << ','
-            << row.beacon_yaw_rmse << ',' << row.mean_cost << ','
-            << row.mean_iterations << ',' << row.mean_runtime_ms << ','
-            << row.convergence_rate << '\n';
-    }
+    write_csv(
+        path,
+        "beacons,beacon_separation,target_rmse,beacon_position_rmse,beacon_yaw_rmse,"
+        "mean_cost,mean_iterations,mean_runtime_ms,success_rate\n",
+        rows,
+        [](std::ostream& out, const GeometrySweepRow& row) {
+            out << row.beacons << ',' << row.beacon_separation << ','
+                << row.target_rmse << ',' << row.beacon_position_rmse << ','
+                << row.beacon_yaw_rmse << ',' << row.mean_cost << ','
+                << row.mean_iterations << ',' << row.mean_runtime_ms << ','
+                << row.convergence_rate;
+        });
 }
 
 /**
@@ -287,17 +315,18 @@ void write_geometry_sweep_csv(const std::filesystem::path& path, const std::vect
  * header `success_rate`).
  */
 void write_trajectory_sweep_csv(const std::filesystem::path& path, const std::vector<TrajectorySweepRow>& rows) {
-    std::ofstream out(path);
-    out << "trajectory,beacons,observability_rank,smallest_singular_value,target_rmse,"
-           "beacon_position_rmse,beacon_yaw_rmse,mean_cost,mean_iterations,mean_runtime_ms,success_rate\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.trajectory << ',' << row.beacons << ',' << row.observability_rank << ','
-            << row.smallest_singular_value << ',' << row.target_rmse << ','
-            << row.beacon_position_rmse << ',' << row.beacon_yaw_rmse << ','
-            << row.mean_cost << ',' << row.mean_iterations << ',' << row.mean_runtime_ms << ','
-            << row.convergence_rate << '\n';
-    }
+    write_csv(
+        path,
+        "trajectory,beacons,observability_rank,smallest_singular_value,target_rmse,"
+        "beacon_position_rmse,beacon_yaw_rmse,mean_cost,mean_iterations,mean_runtime_ms,success_rate\n",
+        rows,
+        [](std::ostream& out, const TrajectorySweepRow& row) {
+            out << row.trajectory << ',' << row.beacons << ',' << row.observability_rank << ','
+                << row.smallest_singular_value << ',' << row.target_rmse << ','
+                << row.beacon_position_rmse << ',' << row.beacon_yaw_rmse << ','
+                << row.mean_cost << ',' << row.mean_iterations << ',' << row.mean_runtime_ms << ','
+                << row.convergence_rate;
+        });
 }
 
 /**
@@ -311,18 +340,18 @@ void write_trajectory_sweep_csv(const std::filesystem::path& path, const std::ve
 void write_initial_pose_robustness_csv(
     const std::filesystem::path& path,
     const std::vector<InitialPoseRobustnessRow>& rows) {
-    std::ofstream out(path);
-    out << "scenario,trial,initial_robot_x,initial_robot_y,final_goal_error,final_target_error,"
-           "final_beacon_position_rmse,final_beacon_yaw_rmse\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.scenario << ',' << row.trial << ','
-            << row.initial_robot.x << ',' << row.initial_robot.y << ','
-            << row.final_goal_error << ',' << row.final_target_error << ','
-            << row.final_beacon_position_rmse << ',';
-        write_optional_metric(out, row.final_beacon_yaw_rmse);
-        out << '\n';
-    }
+    write_csv(
+        path,
+        "scenario,trial,initial_robot_x,initial_robot_y,final_goal_error,final_target_error,"
+        "final_beacon_position_rmse,final_beacon_yaw_rmse\n",
+        rows,
+        [](std::ostream& out, const InitialPoseRobustnessRow& row) {
+            out << row.scenario << ',' << row.trial << ','
+                << row.initial_robot.x << ',' << row.initial_robot.y << ','
+                << row.final_goal_error << ',' << row.final_target_error << ','
+                << row.final_beacon_position_rmse << ',';
+            write_optional_metric(out, row.final_beacon_yaw_rmse);
+        });
 }
 
 /**
@@ -340,17 +369,18 @@ void write_initial_pose_robustness_csv(
 void write_minimal_beacon_excitation_csv(
     const std::filesystem::path& path,
     const std::vector<MinimalBeaconExcitationRow>& rows) {
-    std::ofstream out(path);
-    out << "case,beacons,poses,observability_rank,smallest_singular_value,target_error,"
-           "trajectory_spread,beacon_position_error,beacon_yaw_error,cost,iterations,solver_converged\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.case_name << ',' << row.beacons << ',' << row.poses << ','
-            << row.observability_rank << ',' << row.smallest_singular_value << ','
-            << row.target_error << ',' << row.trajectory_spread << ',' << row.beacon_position_error << ','
-            << row.beacon_yaw_error << ',' << row.cost << ',' << row.iterations << ','
-            << (row.converged ? 1 : 0) << '\n';
-    }
+    write_csv(
+        path,
+        "case,beacons,poses,observability_rank,smallest_singular_value,target_error,"
+        "trajectory_spread,beacon_position_error,beacon_yaw_error,cost,iterations,solver_converged\n",
+        rows,
+        [](std::ostream& out, const MinimalBeaconExcitationRow& row) {
+            out << row.case_name << ',' << row.beacons << ',' << row.poses << ','
+                << row.observability_rank << ',' << row.smallest_singular_value << ','
+                << row.target_error << ',' << row.trajectory_spread << ',' << row.beacon_position_error << ','
+                << row.beacon_yaw_error << ',' << row.cost << ',' << row.iterations << ','
+                << (row.converged ? 1 : 0);
+        });
 }
 
 /**
@@ -364,19 +394,20 @@ void write_minimal_beacon_excitation_csv(
 void write_poor_initialization_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<PoorInitializationSweepRow>& rows) {
-    std::ofstream out(path);
-    out << "case,target_seed_offset,beacon_seed_radius,beacon_yaw_seed,multistarts,"
-           "target_rmse,beacon_position_rmse,beacon_yaw_rmse,mean_cost,mean_iterations,"
-           "mean_runtime_ms,success_rate\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.case_name << ',' << row.target_seed_offset << ','
-            << row.beacon_seed_radius << ',' << row.beacon_yaw_seed << ','
-            << row.multistarts << ',' << row.target_rmse << ','
-            << row.beacon_position_rmse << ',' << row.beacon_yaw_rmse << ','
-            << row.mean_cost << ',' << row.mean_iterations << ','
-            << row.mean_runtime_ms << ',' << row.convergence_rate << '\n';
-    }
+    write_csv(
+        path,
+        "case,target_seed_offset,beacon_seed_radius,beacon_yaw_seed,multistarts,"
+        "target_rmse,beacon_position_rmse,beacon_yaw_rmse,mean_cost,mean_iterations,"
+        "mean_runtime_ms,success_rate\n",
+        rows,
+        [](std::ostream& out, const PoorInitializationSweepRow& row) {
+            out << row.case_name << ',' << row.target_seed_offset << ','
+                << row.beacon_seed_radius << ',' << row.beacon_yaw_seed << ','
+                << row.multistarts << ',' << row.target_rmse << ','
+                << row.beacon_position_rmse << ',' << row.beacon_yaw_rmse << ','
+                << row.mean_cost << ',' << row.mean_iterations << ','
+                << row.mean_runtime_ms << ',' << row.convergence_rate;
+        });
 }
 
 /**
@@ -389,17 +420,18 @@ void write_poor_initialization_sweep_csv(
 void write_intermittent_measurement_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<IntermittentMeasurementSweepRow>& rows) {
-    std::ofstream out(path);
-    out << "dropout_probability,mean_measurements,target_rmse,beacon_position_rmse,"
-           "beacon_yaw_rmse,mean_cost,mean_iterations,mean_runtime_ms,success_rate\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.dropout_probability << ',' << row.mean_measurements << ','
-            << row.target_rmse << ',' << row.beacon_position_rmse << ','
-            << row.beacon_yaw_rmse << ',' << row.mean_cost << ','
-            << row.mean_iterations << ',' << row.mean_runtime_ms << ','
-            << row.convergence_rate << '\n';
-    }
+    write_csv(
+        path,
+        "dropout_probability,mean_measurements,target_rmse,beacon_position_rmse,"
+        "beacon_yaw_rmse,mean_cost,mean_iterations,mean_runtime_ms,success_rate\n",
+        rows,
+        [](std::ostream& out, const IntermittentMeasurementSweepRow& row) {
+            out << row.dropout_probability << ',' << row.mean_measurements << ','
+                << row.target_rmse << ',' << row.beacon_position_rmse << ','
+                << row.beacon_yaw_rmse << ',' << row.mean_cost << ','
+                << row.mean_iterations << ',' << row.mean_runtime_ms << ','
+                << row.convergence_rate;
+        });
 }
 
 /**
@@ -413,19 +445,20 @@ void write_intermittent_measurement_sweep_csv(
 void write_outlier_robustness_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<OutlierRobustnessSweepRow>& rows) {
-    std::ofstream out(path);
-    out << "estimator,outlier_probability,outlier_range_magnitude,outlier_bearing_magnitude,"
-           "target_rmse,beacon_position_rmse,beacon_yaw_rmse,mean_cost,mean_iterations,"
-           "mean_runtime_ms,success_rate\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.estimator << ',' << row.outlier_probability << ','
-            << row.outlier_range_magnitude << ',' << row.outlier_bearing_magnitude << ','
-            << row.target_rmse << ',' << row.beacon_position_rmse << ','
-            << row.beacon_yaw_rmse << ',' << row.mean_cost << ','
-            << row.mean_iterations << ',' << row.mean_runtime_ms << ','
-            << row.convergence_rate << '\n';
-    }
+    write_csv(
+        path,
+        "estimator,outlier_probability,outlier_range_magnitude,outlier_bearing_magnitude,"
+        "target_rmse,beacon_position_rmse,beacon_yaw_rmse,mean_cost,mean_iterations,"
+        "mean_runtime_ms,success_rate\n",
+        rows,
+        [](std::ostream& out, const OutlierRobustnessSweepRow& row) {
+            out << row.estimator << ',' << row.outlier_probability << ','
+                << row.outlier_range_magnitude << ',' << row.outlier_bearing_magnitude << ','
+                << row.target_rmse << ',' << row.beacon_position_rmse << ','
+                << row.beacon_yaw_rmse << ',' << row.mean_cost << ','
+                << row.mean_iterations << ',' << row.mean_runtime_ms << ','
+                << row.convergence_rate;
+        });
 }
 
 /**
@@ -440,16 +473,17 @@ void write_outlier_robustness_sweep_csv(
 void write_vehicle_localization_noise_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<VehicleLocalizationNoiseSweepRow>& rows) {
-    std::ofstream out(path);
-    out << "case,vehicle_position_sigma,target_rmse,beacon_position_rmse,beacon_yaw_rmse,"
-           "mean_cost,mean_iterations,mean_runtime_ms,success_rate\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.case_name << ',' << row.vehicle_position_sigma << ',' << row.target_rmse << ','
-            << row.beacon_position_rmse << ',' << row.beacon_yaw_rmse << ','
-            << row.mean_cost << ',' << row.mean_iterations << ','
-            << row.mean_runtime_ms << ',' << row.convergence_rate << '\n';
-    }
+    write_csv(
+        path,
+        "case,vehicle_position_sigma,target_rmse,beacon_position_rmse,beacon_yaw_rmse,"
+        "mean_cost,mean_iterations,mean_runtime_ms,success_rate\n",
+        rows,
+        [](std::ostream& out, const VehicleLocalizationNoiseSweepRow& row) {
+            out << row.case_name << ',' << row.vehicle_position_sigma << ',' << row.target_rmse << ','
+                << row.beacon_position_rmse << ',' << row.beacon_yaw_rmse << ','
+                << row.mean_cost << ',' << row.mean_iterations << ','
+                << row.mean_runtime_ms << ',' << row.convergence_rate;
+        });
 }
 
 /**
@@ -467,17 +501,18 @@ void write_vehicle_localization_noise_sweep_csv(
 void write_information_conditioning_csv(
     const std::filesystem::path& path,
     const std::vector<InformationConditioningRow>& rows) {
-    std::ofstream out(path);
-    out << "trajectory,beacons,observations,observability_rank,smallest_singular_value,"
-           "trajectory_spread,largest_singular_value,condition_number,logdet_information\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.trajectory << ',' << row.beacons << ',' << row.observations << ','
-            << row.observability_rank << ',' << row.smallest_singular_value << ','
-            << row.trajectory_spread << ','
-            << row.largest_singular_value << ',' << row.condition_number << ','
-            << row.logdet_information << '\n';
-    }
+    write_csv(
+        path,
+        "trajectory,beacons,observations,observability_rank,smallest_singular_value,"
+        "trajectory_spread,largest_singular_value,condition_number,logdet_information\n",
+        rows,
+        [](std::ostream& out, const InformationConditioningRow& row) {
+            out << row.trajectory << ',' << row.beacons << ',' << row.observations << ','
+                << row.observability_rank << ',' << row.smallest_singular_value << ','
+                << row.trajectory_spread << ','
+                << row.largest_singular_value << ',' << row.condition_number << ','
+                << row.logdet_information;
+        });
 }
 
 /**
@@ -492,20 +527,21 @@ void write_information_conditioning_csv(
 void write_expanded_baseline_summary_csv(
     const std::filesystem::path& path,
     const std::vector<ExpandedBaselineSummaryRow>& rows) {
-    std::ofstream out(path);
-    out << "case,estimator,beacons,target_rmse,target_rmse_ci95,beacon_position_rmse,"
-           "beacon_position_rmse_ci95,beacon_yaw_rmse,beacon_yaw_rmse_ci95,"
-           "mean_cost,mean_iterations,mean_runtime_ms,success_rate\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.case_name << ',' << row.estimator << ',' << row.beacons << ','
-            << row.target_rmse << ',' << row.target_rmse_ci95 << ','
-            << row.beacon_position_rmse << ',' << row.beacon_position_rmse_ci95 << ','
-            << row.beacon_yaw_rmse << ',' << row.beacon_yaw_rmse_ci95 << ','
-            << row.mean_cost << ','
-            << row.mean_iterations << ',' << row.mean_runtime_ms << ','
-            << row.convergence_rate << '\n';
-    }
+    write_csv(
+        path,
+        "case,estimator,beacons,target_rmse,target_rmse_ci95,beacon_position_rmse,"
+        "beacon_position_rmse_ci95,beacon_yaw_rmse,beacon_yaw_rmse_ci95,"
+        "mean_cost,mean_iterations,mean_runtime_ms,success_rate\n",
+        rows,
+        [](std::ostream& out, const ExpandedBaselineSummaryRow& row) {
+            out << row.case_name << ',' << row.estimator << ',' << row.beacons << ','
+                << row.target_rmse << ',' << row.target_rmse_ci95 << ','
+                << row.beacon_position_rmse << ',' << row.beacon_position_rmse_ci95 << ','
+                << row.beacon_yaw_rmse << ',' << row.beacon_yaw_rmse_ci95 << ','
+                << row.mean_cost << ','
+                << row.mean_iterations << ',' << row.mean_runtime_ms << ','
+                << row.convergence_rate;
+        });
 }
 
 /**
@@ -520,16 +556,17 @@ void write_expanded_baseline_summary_csv(
 void write_active_excitation_comparison_csv(
     const std::filesystem::path& path,
     const std::vector<ActiveExcitationComparisonRow>& rows) {
-    std::ofstream out(path);
-    out << "excitation,beacons,final_goal_error_m,final_target_error_m,"
-           "final_beacon_position_rmse_m,final_beacon_yaw_rmse_rad,final_cost\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.excitation << ',' << row.beacons << ','
-            << row.final_goal_error << ',' << row.final_target_error << ','
-            << row.final_beacon_position_rmse << ',' << row.final_beacon_yaw_rmse << ','
-            << row.final_cost << '\n';
-    }
+    write_csv(
+        path,
+        "excitation,beacons,final_goal_error_m,final_target_error_m,"
+        "final_beacon_position_rmse_m,final_beacon_yaw_rmse_rad,final_cost\n",
+        rows,
+        [](std::ostream& out, const ActiveExcitationComparisonRow& row) {
+            out << row.excitation << ',' << row.beacons << ','
+                << row.final_goal_error << ',' << row.final_target_error << ','
+                << row.final_beacon_position_rmse << ',' << row.final_beacon_yaw_rmse << ','
+                << row.final_cost;
+        });
 }
 
 /**
@@ -545,18 +582,19 @@ void write_active_excitation_comparison_csv(
 void write_supervised_excitation_comparison_csv(
     const std::filesystem::path& path,
     const std::vector<SupervisedExcitationComparisonRow>& rows) {
-    std::ofstream out(path);
-    out << "excitation,retrigger_count,steps_to_goal_threshold,steps_to_target_threshold,"
-           "final_goal_error_m,final_target_error_m,final_beacon_position_rmse_m,"
-           "final_beacon_yaw_rmse_rad,final_cost\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.excitation << ',' << row.retrigger_count << ','
-            << row.steps_to_goal_threshold << ',' << row.steps_to_target_threshold << ','
-            << row.final_goal_error << ',' << row.final_target_error << ','
-            << row.final_beacon_position_rmse << ',' << row.final_beacon_yaw_rmse << ','
-            << row.final_cost << '\n';
-    }
+    write_csv(
+        path,
+        "excitation,retrigger_count,steps_to_goal_threshold,steps_to_target_threshold,"
+        "final_goal_error_m,final_target_error_m,final_beacon_position_rmse_m,"
+        "final_beacon_yaw_rmse_rad,final_cost\n",
+        rows,
+        [](std::ostream& out, const SupervisedExcitationComparisonRow& row) {
+            out << row.excitation << ',' << row.retrigger_count << ','
+                << row.steps_to_goal_threshold << ',' << row.steps_to_target_threshold << ','
+                << row.final_goal_error << ',' << row.final_target_error << ','
+                << row.final_beacon_position_rmse << ',' << row.final_beacon_yaw_rmse << ','
+                << row.final_cost;
+        });
 }
 
 /**
@@ -571,22 +609,23 @@ void write_supervised_excitation_comparison_csv(
 void write_supervised_lambda_sweep_csv(
     const std::filesystem::path& path,
     const std::vector<SupervisedLambdaSweepRow>& rows) {
-    std::ofstream out(path);
-    out << "lambda,supervised_retrigger_count,"
-           "fixed_final_target_error_m,fixed_final_beacon_position_rmse_m,"
-           "fixed_final_beacon_yaw_rmse_rad,"
-           "supervised_final_target_error_m,supervised_final_beacon_position_rmse_m,"
-           "supervised_final_beacon_yaw_rmse_rad\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& row : rows) {
-        out << row.lambda << ',' << row.supervised_retrigger_count << ','
-            << row.fixed_final_target_error << ','
-            << row.fixed_final_beacon_position_rmse << ','
-            << row.fixed_final_beacon_yaw_rmse << ','
-            << row.supervised_final_target_error << ','
-            << row.supervised_final_beacon_position_rmse << ','
-            << row.supervised_final_beacon_yaw_rmse << '\n';
-    }
+    write_csv(
+        path,
+        "lambda,supervised_retrigger_count,"
+        "fixed_final_target_error_m,fixed_final_beacon_position_rmse_m,"
+        "fixed_final_beacon_yaw_rmse_rad,"
+        "supervised_final_target_error_m,supervised_final_beacon_position_rmse_m,"
+        "supervised_final_beacon_yaw_rmse_rad\n",
+        rows,
+        [](std::ostream& out, const SupervisedLambdaSweepRow& row) {
+            out << row.lambda << ',' << row.supervised_retrigger_count << ','
+                << row.fixed_final_target_error << ','
+                << row.fixed_final_beacon_position_rmse << ','
+                << row.fixed_final_beacon_yaw_rmse << ','
+                << row.supervised_final_target_error << ','
+                << row.supervised_final_beacon_position_rmse << ','
+                << row.supervised_final_beacon_yaw_rmse;
+        });
 }
 
 /**
@@ -623,18 +662,19 @@ void write_example_csvs(const std::filesystem::path& output_dir) {
  * time series also embedded as JSON by write_closed_loop_json() for the HTML viewer.
  */
 void write_closed_loop_csv(const std::filesystem::path& path, const ClosedLoopResult& result) {
-    std::ofstream out(path);
-    out << "step,robot_x,robot_y,target_estimate_x,target_estimate_y,target_error,goal_error,"
-           "beacon_position_rmse,beacon_yaw_rmse,cost,retriggered\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& point : result.points) {
-        out << point.step << ',' << point.robot.x << ',' << point.robot.y << ','
-            << point.target_estimate.x << ',' << point.target_estimate.y << ','
-            << point.target_error << ',' << point.goal_error << ','
-            << point.beacon_position_rmse << ',';
-        write_optional_metric(out, point.beacon_yaw_rmse);
-        out << ',' << point.cost << ',' << (point.retriggered ? 1 : 0) << '\n';
-    }
+    write_csv(
+        path,
+        "step,robot_x,robot_y,target_estimate_x,target_estimate_y,target_error,goal_error,"
+        "beacon_position_rmse,beacon_yaw_rmse,cost,retriggered\n",
+        result.points,
+        [](std::ostream& out, const ClosedLoopPoint& point) {
+            out << point.step << ',' << point.robot.x << ',' << point.robot.y << ','
+                << point.target_estimate.x << ',' << point.target_estimate.y << ','
+                << point.target_error << ',' << point.goal_error << ','
+                << point.beacon_position_rmse << ',';
+            write_optional_metric(out, point.beacon_yaw_rmse);
+            out << ',' << point.cost << ',' << (point.retriggered ? 1 : 0);
+        });
 }
 
 /**
@@ -1226,19 +1266,20 @@ scenarioSelect.onchange=e=>{scenarioIndex=Number(e.target.value);stepIndex=0;sto
 void write_adaptive_localization_csv(
     const std::filesystem::path& path,
     const AdaptiveLocalizationRun& result) {
-    std::ofstream out(path);
-    out << "step,robot_x,robot_y,target_estimate_x,target_estimate_y,target_error,goal_error,cost\n";
-    out << std::fixed << std::setprecision(8);
-    for (const auto& point : result.points) {
-        out << point.step << ','
-            << point.robot.x << ','
-            << point.robot.y << ','
-            << point.target_estimate.x << ','
-            << point.target_estimate.y << ','
-            << point.target_error << ','
-            << point.goal_error << ','
-            << point.cost << '\n';
-    }
+    write_csv(
+        path,
+        "step,robot_x,robot_y,target_estimate_x,target_estimate_y,target_error,goal_error,cost\n",
+        result.points,
+        [](std::ostream& out, const AdaptiveLocalizationPoint& point) {
+            out << point.step << ','
+                << point.robot.x << ','
+                << point.robot.y << ','
+                << point.target_estimate.x << ','
+                << point.target_estimate.y << ','
+                << point.target_error << ','
+                << point.goal_error << ','
+                << point.cost;
+        });
 }
 
 }  // namespace adaptive

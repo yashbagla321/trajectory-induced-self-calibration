@@ -45,6 +45,22 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
+### Sanitizer build (optional, for development)
+
+```bash
+cmake --preset sanitize-debug
+cmake --build --preset sanitize-debug --config Debug
+```
+
+Builds Debug with AddressSanitizer (and UndefinedBehaviorSanitizer on
+Clang/GCC; MSVC only supports ASan) via `CMakePresets.json`, to catch
+out-of-bounds/undefined-behavior bugs in the hand-rolled pointer/array
+indexing used throughout the EKF and Jacobi eigensolver. Requires CMake
+3.21+. On MSVC, the ASan runtime DLL
+(`clang_rt.asan_dynamic-x86_64.dll`, under your Visual Studio
+installation's `VC/Tools/MSVC/<version>/bin/Hostx64/x64`) must be on
+`PATH` to run the resulting binary.
+
 ## Run
 
 ```powershell
@@ -71,9 +87,18 @@ noise levels, random seeds, and solver parameters) and writes into
 | `results/poor_initialization_sweep.csv`, `results/intermittent_measurement_sweep.csv`, `results/outlier_robustness_sweep.csv`, `results/vehicle_localization_noise_sweep.csv`, `results/geometry_sweep.csv`, `results/initial_pose_robustness.csv` | Table III (robustness under poor initialization, dropouts, outliers, vehicle-pose error, weak trajectories) |
 
 Note: `results/expanded_baseline_summary.csv`'s wall-clock timing column is
-host-machine-dependent (the paper's Table II caption says so explicitly);
-every error/RMSE/rank column is seed-deterministic and will reproduce
-exactly.
+host-machine-dependent (the paper's Table II caption says so explicitly).
+Every error/RMSE/rank column is seed-deterministic given a fixed
+`std::mt19937` stream, but exact bit-for-bit reproduction of the committed
+CSVs additionally requires the same C++ standard library implementation
+used to generate them (this repo's checked-in results were built with
+MSVC's STL on Windows): `std::normal_distribution`'s sample sequence for a
+given engine state is implementation-defined, not specified by the C++
+standard, so `sample_noise()` (`include/adaptive_localization/Math.hpp`)
+can draw a different-but-statistically-equivalent sequence on, e.g., libstdc++
+or libc++. Rebuilding on a different standard library will reproduce the
+same trends and conclusions but not necessarily identical values to the
+last decimal place.
 
 ## Figures
 

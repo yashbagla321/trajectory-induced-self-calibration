@@ -1,0 +1,22 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "sanitize-debug",
+            "displayName": "Debug + AddressSanitizer/UBSan",
+            "description": "Debug build with ENABLE_SANITIZERS=ON. Catches out-of-bounds/undefined-behavior bugs in the hand-rolled pointer/array indexing in the EKF and Jacobi eigensolver. UBSan only applies on non-MSVC compilers (Clang/GCC); MSVC gets AddressSanitizer alone.",
+            "binaryDir": "${sourceDir}/build/sanitize-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "ENABLE_SANITIZERS": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "sanitize-debug",
+            "configurePreset": "sanitize-debug"
+        }
+    ]
+}

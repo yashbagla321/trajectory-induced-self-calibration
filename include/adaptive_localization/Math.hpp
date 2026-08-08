@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cmath>
+#include <random>
 
 namespace adaptive {
 
@@ -90,6 +91,23 @@ inline Vec2 rotate(const Vec2& v, double yaw) {
 /// beacon's local frame.
 inline double bearing(const Vec2& from, const Vec2& to) {
     return std::atan2(to.y - from.y, to.x - from.x);
+}
+
+/**
+ * Draws one zero-mean Gaussian noise sample with standard deviation `sigma`,
+ * or exactly 0.0 (no distribution constructed) when `sigma <= 0.0`, which is
+ * how the rest of the codebase represents a noiseless channel. Shared by
+ * every measurement-noise call site (see the "Results-to-paper map" note in
+ * README.md on why `std::normal_distribution`'s sample sequence -- and
+ * hence bit-for-bit reproduction of the committed results -- is tied to a
+ * specific standard library implementation).
+ */
+inline double sample_noise(double sigma, std::mt19937& rng) {
+    if (sigma <= 0.0) {
+        return 0.0;
+    }
+    std::normal_distribution<double> distribution(0.0, sigma);
+    return distribution(rng);
 }
 
 }  // namespace adaptive
