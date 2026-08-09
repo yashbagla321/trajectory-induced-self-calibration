@@ -137,6 +137,11 @@ struct ClosedLoopPoint {
     /// accuracy-vs-effort tradeoff.
     double excitation_norm2 = 0.0;
     bool retriggered = false;
+    /// Whether the scenario-1 estimator had been seeded by the constructive
+    /// two-view initializer at this step (the Algorithm 1 gate). False while
+    /// the stored window holds fewer than two distinct views, during which
+    /// the target estimate remains at its prior; always true for scenario 2.
+    bool estimate_ready = false;
 };
 
 /// Full trajectory of a closed-loop run: which `scenario` model was used,

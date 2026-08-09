@@ -74,6 +74,7 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
         tests/test_jacobian.cpp
         tests/test_gauss_newton.cpp
         tests/test_jacobi_eigenvalues.cpp
+        tests/test_closed_loop_gate.cpp
     )
 
     target_link_libraries(adaptive_localization_tests PRIVATE adaptive_localization_core)

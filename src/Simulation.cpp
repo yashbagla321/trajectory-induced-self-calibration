@@ -580,8 +580,8 @@ double predicted_local_logdet_score(
  *        difference step h), `exploration_amplitude`/`exploration_decay`
  *        (envelope cap), and `information_exploration_gain` (gradient
  *        scale).
- * @param step             Current closed-loop step index, used to decay the
- *        envelope over time.
+ * @param elapsed_time     Physical time elapsed since the loop started
+ *        (seconds), used to decay the envelope over time.
  * @return {0,0} if preconditions fail, the gradient is non-finite, or the
  *         gradient norm is negligible (< 1e-9); otherwise a vector along
  *         the ascent direction of the logdet score, magnitude-capped by the
@@ -595,7 +595,7 @@ Vec2 information_driven_excitation(
     const std::vector<Vec2>& path,
     const std::vector<LocalFrameMeasurement>& measurements,
     const SimulationConfig& config,
-    int step) {
+    double elapsed_time) {
     if (path.empty() || state.size() != 5 || beacon_estimates.size() != 1) {
         return {0.0, 0.0};
     }
@@ -626,7 +626,7 @@ Vec2 information_driven_excitation(
     // controller settles down over time even if the gradient stays large.
     const double envelope =
         config.exploration_amplitude *
-        std::exp(-config.exploration_decay * static_cast<double>(step - 1));
+        std::exp(-config.exploration_decay * elapsed_time);
     const double magnitude = std::min(
         envelope,
         config.information_exploration_gain * gradient_norm);
@@ -1594,6 +1594,11 @@ ClosedLoopResult run_closed_loop_comparison(
     // Step index at which the current excitation "epoch" began; only
     // meaningful/updated in Supervised mode, where retriggering resets it.
     int excitation_epoch = 1;
+    // Two-view gate (Algorithm 1): the scenario-1 estimator retains its
+    // prior until the stored window contains two distinct views and the
+    // constructive seed exists, so no gauge-dependent solution ever feeds
+    // the controller. Scenario 2 needs no gauge-removing seed.
+    bool estimator_initialized = scenario != 1;
 
     ClosedLoopPoint initial_point;
     initial_point.step = 0;
@@ -1606,6 +1611,7 @@ ClosedLoopResult run_closed_loop_comparison(
     initial_point.beacon_yaw_rmse =
         scenario == 1 ? beacon_yaw_rmse(world, beacon_estimates) : -1.0;
     initial_point.cost = current_cost;
+    initial_point.estimate_ready = estimator_initialized;
     points.push_back(initial_point);
 
     for (int step = 1; step <= config.closed_loop_steps; ++step) {
@@ -1622,23 +1628,45 @@ ClosedLoopResult run_closed_loop_comparison(
             }
         }
 
-        // Re-solve the batch estimate from scratch using the *entire*
-        // measurement history accumulated so far (warm-started from the
-        // previous step's state), for scenario 1 (joint target+beacon
-        // self-calibration) or scenario 2 (target-only, beacons averaged
-        // afterward).
+        // Refine the batch estimate over the *entire* measurement history
+        // accumulated so far, for scenario 1 (joint target+beacon
+        // self-calibration, gated on the two-view constructive seed) or
+        // scenario 2 (target-only, beacons averaged afterward).
         if (scenario == 1) {
-            const auto result = gauss_newton(
-                state1,
-                [&](const std::vector<double>& state) {
-                    return residuals_scenario1(state, beacon_count, path, local_measurements);
-                },
-                config.closed_loop_solver_max_iterations,
-                config.closed_loop_solver_initial_lambda);
-            state1 = result.x;
-            target_estimate = {state1[0], state1[1]};
-            current_cost = result.cost;
-            beacon_estimates = beacon_estimates_from_scenario1_state(state1, beacon_count);
+            if (!estimator_initialized) {
+                // Try the constructive two-view seed once per step until the
+                // window contains two distinct views; until then the prior
+                // estimate is retained untouched.
+                std::vector<double> closed_form_seed;
+                estimator_initialized = two_view_closed_form_initial_state(
+                    beacon_count, path, local_measurements, closed_form_seed);
+                if (estimator_initialized) {
+                    state1 = std::move(closed_form_seed);
+                }
+            }
+            if (estimator_initialized) {
+                // Warm-started damped Gauss-Newton on residuals whitened with
+                // the actual closed-loop noise sigmas, with the analytic
+                // Jacobian (no finite-difference fallback).
+                const auto result = gauss_newton(
+                    state1,
+                    [&](const std::vector<double>& state) {
+                        return residuals_scenario1(
+                            state, beacon_count, path, local_measurements,
+                            config.closed_loop_noise);
+                    },
+                    config.closed_loop_solver_max_iterations,
+                    config.closed_loop_solver_initial_lambda,
+                    [&](const std::vector<double>& state) {
+                        return jacobian_scenario1(
+                            state, beacon_count, path, local_measurements,
+                            config.closed_loop_noise);
+                    });
+                state1 = result.x;
+                target_estimate = {state1[0], state1[1]};
+                current_cost = result.cost;
+                beacon_estimates = beacon_estimates_from_scenario1_state(state1, beacon_count);
+            }
         } else {
             const auto result = gauss_newton(
                 state2,
@@ -1685,16 +1713,19 @@ ClosedLoopResult run_closed_loop_comparison(
             }
         }
 
-        // Decaying circular "swirl" excitation term: amplitude decays
-        // exponentially since the start of the current epoch (Supervised
-        // mode measures decay/phase relative to the last retrigger;
-        // Circular/Information modes measure relative to step 0).
+        // Decaying circular "swirl" excitation term, evaluated at the
+        // physical packet time t_k = (k-1)*dt so lambda is in s^-1 and omega
+        // in rad/s (matching the paper and the Gazebo node). The amplitude
+        // decays exponentially since the start of the current epoch
+        // (Supervised mode measures decay relative to the last retrigger;
+        // Circular/Information modes measure relative to the loop start);
+        // the swirl phase always advances with absolute time.
+        const double current_time = static_cast<double>(step - 1) * config.closed_loop_dt;
+        const double epoch_time = static_cast<double>(excitation_epoch - 1) * config.closed_loop_dt;
         const double decay_reference = excitation_mode == ClosedLoopExcitationMode::Supervised
-            ? static_cast<double>(step - excitation_epoch)
-            : static_cast<double>(step - 1);
-        const double phase_reference = excitation_mode == ClosedLoopExcitationMode::Supervised
-            ? static_cast<double>(step)
-            : static_cast<double>(step - 1);
+            ? current_time - epoch_time
+            : current_time;
+        const double phase_reference = current_time;
         const double exploration =
             config.exploration_amplitude * std::exp(-config.exploration_decay * decay_reference);
         const Vec2 swirl{
@@ -1715,7 +1746,7 @@ ClosedLoopResult run_closed_loop_comparison(
                 path,
                 local_measurements,
                 config,
-                step);
+                current_time);
         }
         // Target-seeking control plus excitation, integrated with a fixed
         // Euler step (closed_loop_dt).
@@ -1736,6 +1767,7 @@ ClosedLoopResult run_closed_loop_comparison(
         point.sigma_min = sigma_min_diagnostic;
         point.excitation_norm2 = dot(excitation, excitation);
         point.retriggered = retriggered;
+        point.estimate_ready = estimator_initialized;
         points.push_back(point);
     }
 

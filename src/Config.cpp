@@ -438,7 +438,7 @@ closed_loop_control_gain = 1.2
 # Decaying exploratory swirl added to the controller.
 # This helps early measurements excite the geometry before station keeping.
 exploration_amplitude = 0.25
-exploration_decay = 0.035
+exploration_decay = 0.5
 exploration_frequency = 0.45
 
 # Information-driven excitation settings. The controller uses finite

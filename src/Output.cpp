@@ -758,16 +758,18 @@ void write_example_csvs(const std::filesystem::path& output_dir) {
  * target-estimate position, target error, goal error, beacon position RMSE, beacon yaw RMSE
  * (blank via write_optional_metric() when the -1.0 sentinel indicates yaw is not estimated,
  * e.g. for the calibrated baseline scenario), least-squares cost, the supervision/diagnostic
- * columns (`spread`, `sigma_min`, `excitation_norm2` -- see below), and whether active
- * excitation was retriggered at that step (0/1). This is the CSV counterpart of the per-run
- * time series also embedded as JSON by write_closed_loop_json() for the HTML viewer.
+ * columns (`spread`, `sigma_min`, `excitation_norm2` -- see below), whether active
+ * excitation was retriggered at that step (0/1), and whether the two-view constructive
+ * seed had initialized the estimator by that step (`estimate_ready`, 0/1). This is the CSV
+ * counterpart of the per-run time series also embedded as JSON by write_closed_loop_json()
+ * for the HTML viewer.
  */
 void write_closed_loop_csv(const std::filesystem::path& path, const ClosedLoopResult& result) {
     write_csv(
         path,
         "step,robot_x,robot_y,target_estimate_x,target_estimate_y,target_error,goal_error,"
         "beacon_position_rmse,beacon_yaw_rmse,cost,spread,sigma_min,excitation_norm2,"
-        "retriggered\n",
+        "retriggered,estimate_ready\n",
         result.points,
         [](std::ostream& out, const ClosedLoopPoint& point) {
             out << point.step << ',' << point.robot.x << ',' << point.robot.y << ','
@@ -783,7 +785,8 @@ void write_closed_loop_csv(const std::filesystem::path& path, const ClosedLoopRe
             // integrated excitation effort).
             out << ',' << point.cost << ',' << point.spread << ',';
             write_optional_metric(out, point.sigma_min);
-            out << ',' << point.excitation_norm2 << ',' << (point.retriggered ? 1 : 0);
+            out << ',' << point.excitation_norm2 << ',' << (point.retriggered ? 1 : 0) << ','
+                << (point.estimate_ready ? 1 : 0);
         });
 }
 

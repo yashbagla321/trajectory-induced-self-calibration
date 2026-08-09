@@ -49,8 +49,11 @@ struct SimulationConfig {
     double closed_loop_control_gain = 1.2;
 
     // Decaying exploratory swirl that keeps early measurements informative.
+    // Decay and frequency are physical-time rates (s^-1 and rad/s): the loop
+    // evaluates the envelope at t = (packet - 1) * closed_loop_dt, not at the
+    // packet index.
     double exploration_amplitude = 0.25;
-    double exploration_decay = 0.035;
+    double exploration_decay = 0.5;
     double exploration_frequency = 0.45;
     double information_exploration_gain = 0.35;
     double information_gradient_step = 0.08;
