@@ -53,8 +53,13 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results"
 OUT = ROOT / "figures" / "conditioning_summary.png"
 
-MARKER_FILL = "#2a78d6"
-MARKER_OUTLINE = "#12335c"
+# Marker palette, matched to the paper's Fig. 2 colors: the two weakly
+# excited trajectories (see WEAK below) are drawn in the paper's red and
+# every well-excited trajectory in the paper's blue.
+MARKER_FILL = "#2563eb"
+MARKER_OUTLINE = "#1e3a8a"
+WEAK_MARKER_FILL = "#e11d48"
+WEAK_MARKER_OUTLINE = "#881337"
 MARKER_TEXT = "#ffffff"
 
 # Display name for the shared legend, keyed by the trajectory field in the CSVs.
@@ -70,7 +75,8 @@ DISPLAY_NAME = {
     "circle": "circle",
 }
 # The two weakly excited trajectories (full rank but poorly conditioned) are
-# called out in bold in the shared legend.
+# drawn with red markers in both panels and called out in bold in the shared
+# legend.
 WEAK = {"short_line", "repeated_viewpoints"}
 
 
@@ -180,7 +186,7 @@ def declutter(positions: list[list[float]], min_dist: float, iterations: int = 6
             break
 
 
-def draw_numbered_marker(draw: ImageDraw.ImageDraw, px: float, py: float, number: int, f_num: ImageFont.ImageFont) -> None:
+def draw_numbered_marker(draw: ImageDraw.ImageDraw, px: float, py: float, number: int, f_num: ImageFont.ImageFont, weak: bool = False) -> None:
     """Draw a single filled circular marker (radius 11px) at pixel
     coordinates (px, py) with ``number`` centered inside it in white text.
 
@@ -190,11 +196,15 @@ def draw_numbered_marker(draw: ImageDraw.ImageDraw, px: float, py: float, number
         number: the integer label to render inside the marker (matches the
             trajectory's index in the shared legend).
         f_num: font used to render the label text.
+        weak: True renders the weakly-excited red marker colors instead of
+            the default blue.
 
     Returns: None (draws directly onto ``draw``'s underlying image).
     """
     r = 11
-    draw.ellipse((px - r, py - r, px + r, py + r), fill=MARKER_FILL, outline=MARKER_OUTLINE, width=2)
+    draw.ellipse((px - r, py - r, px + r, py + r),
+                 fill=WEAK_MARKER_FILL if weak else MARKER_FILL,
+                 outline=WEAK_MARKER_OUTLINE if weak else MARKER_OUTLINE, width=2)
     text = str(number)
     # Measure the text's bounding box so it can be centered exactly within
     # the circle rather than merely anchored at a corner.
@@ -224,8 +234,9 @@ def draw_scatter(
     Parameters:
         draw: Pillow drawing context to render onto.
         rect: (left, top, right, bottom) pixel bounds of the panel card.
-        points: list of (x, y, number) in data space, where ``number`` is
-            the marker's integer legend index.
+        points: list of (x, y, number, weak) in data space, where ``number``
+            is the marker's integer legend index and ``weak`` selects the
+            red weakly-excited marker colors.
         title: panel title text.
         x_label, y_label: axis label text.
         x_fmt, y_fmt: ``str.format``-style format strings (e.g. "{:.1f}")
@@ -279,7 +290,7 @@ def draw_scatter(
         w = f_tick.getlength(x_fmt.format(value)) if hasattr(f_tick, "getlength") else 20
         draw.text((gx - w / 2, plot_bottom + 7), x_fmt.format(value), fill="#898781", font=f_tick)
 
-    pixel_positions = [list(to_px(x, y)) for x, y, _ in points]
+    pixel_positions = [list(to_px(x, y)) for x, y, _, _ in points]
     # Separate markers that would otherwise overlap (some trajectories have
     # nearly identical S_v/kappa values) before drawing them.
     declutter(pixel_positions, min_dist=26.0)
@@ -289,8 +300,8 @@ def draw_scatter(
     for pos in pixel_positions:
         pos[0] = min(max(pos[0], plot_left + r), plot_right - r)
         pos[1] = min(max(pos[1], plot_top + r), plot_bottom - r)
-    for (px, py), (_, _, number) in zip(pixel_positions, points):
-        draw_numbered_marker(draw, px, py, number, f_num)
+    for (px, py), (_, _, number, weak) in zip(pixel_positions, points):
+        draw_numbered_marker(draw, px, py, number, f_num, weak)
 
     draw.text((left + 12, top + (bottom - top) / 2 - 8), y_label, fill="#334155", font=f_label)
     draw.text(((plot_left + plot_right) / 2 - 60, bottom - 16), x_label, fill="#334155", font=f_label)
@@ -328,12 +339,14 @@ def draw_legend(draw: ImageDraw.ImageDraw, rect: tuple[int, int, int, int], orde
         cx = left + 20 + col * col_w
         cy = top + 40 + row * row_h
         r = 9
-        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=MARKER_FILL, outline=MARKER_OUTLINE, width=2)
+        is_weak = name in WEAK
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r),
+                     fill=WEAK_MARKER_FILL if is_weak else MARKER_FILL,
+                     outline=WEAK_MARKER_OUTLINE if is_weak else MARKER_OUTLINE, width=2)
         text = str(i + 1)
         bbox = draw.textbbox((0, 0), text, font=f_num)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         draw.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]), text, fill=MARKER_TEXT, font=f_num)
-        is_weak = name in WEAK
         label = DISPLAY_NAME[name] + ("  (weak)" if is_weak else "")
         draw.text((cx + 16, cy - 9), label, fill="#111827" if is_weak else "#334155",
                    font=f_entry_bold if is_weak else f_entry)
@@ -365,8 +378,10 @@ def main() -> None:
 
     # Both quantities span orders of magnitude across trajectories, so plot
     # them in log10 space; RMSE (already in meters, a narrower range) is left linear.
-    conditioning_points = [(math.log10(sv), math.log10(kappa), number_by_name[name]) for name, sv, kappa, _ in points]
-    rmse_points = [(math.log10(sv), rmse, number_by_name[name]) for name, sv, _, rmse in points]
+    conditioning_points = [
+        (math.log10(sv), math.log10(kappa), number_by_name[name], name in WEAK) for name, sv, kappa, _ in points
+    ]
+    rmse_points = [(math.log10(sv), rmse, number_by_name[name], name in WEAK) for name, sv, _, rmse in points]
 
     img = Image.new("RGB", (1100, 800), "#f8fafc")
     draw = ImageDraw.Draw(img)
