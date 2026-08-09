@@ -1878,7 +1878,7 @@ std::vector<SupervisedExcitationComparisonRow> run_supervised_excitation_compari
     const auto nominal = run_pair("nominal", config);
 
     // Understimulated scenario: the excitation schedule decays far faster
-    // than the ACC 2027 default, and the robot starts exactly at the true
+    // than the paper's default, and the robot starts exactly at the true
     // target (matching World::make_world's fixed target), removing the
     // convergence transient that would otherwise supply diversity on its
     // own. Only the excitation schedule itself can excite the geometry.

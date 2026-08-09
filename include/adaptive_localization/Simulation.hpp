@@ -51,7 +51,7 @@ enum class ClosedLoopExcitationMode {
      *  information_driven_excitation() in Simulation.cpp) instead of a
      *  fixed schedule. */
     Information,
-    /** Excitation-supervised mode (Algorithm 1 in the CDC closed-loop
+    /** Excitation-supervised mode (Algorithm 1 in the closed-loop
      *  paper): the decaying schedule's epoch is retriggered while the
      *  stored window's trajectory spread S_v (computed from the known
      *  measurement poses, see Math.hpp's path_spread) is below the
@@ -149,7 +149,7 @@ std::vector<ActiveExcitationComparisonRow> run_active_excitation_comparison(
 
 /**
  * @brief Runs the fixed-schedule vs. excitation-supervised closed-loop
- * comparison (Algorithm 1 in the CDC closed-loop paper): packets to reach
+ * comparison (Algorithm 1 in the closed-loop paper): packets to reach
  * the goal/target error thresholds, final accuracy, and how many times the
  * supervised controller retriggered its excitation epoch, under two scenarios: a nominal case
  * (default configuration) and an "understimulated" case (fast decay, robot

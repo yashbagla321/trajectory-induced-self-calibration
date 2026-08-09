@@ -8,12 +8,12 @@
 #include "adaptive_localization/Output.hpp"
 #include "adaptive_localization/Simulation.hpp"
 
-// This entry point is trimmed to the sweeps and tables cited by the ACC
+// This entry point is trimmed to the sweeps and tables cited by the
 // paper "Trajectory-Induced Self-Calibration for Hidden-Target Localization
 // Through an Unknown-Pose Range-Bearing Relay". The estimator core
 // (include/, src/*.cpp other than this file) is shared verbatim with the
-// companion CDC repository, which runs the closed-loop supervision study
-// this file does not exercise.
+// companion excitation-supervised-closed-loop repository, which runs the
+// closed-loop supervision study this file does not exercise.
 
 namespace {
 
@@ -89,7 +89,7 @@ void print_run_summary(
     const adaptive::SimulationConfig& config,
     const std::filesystem::path& config_path,
     const std::vector<adaptive::SummaryRow>& summaries) {
-    std::cout << "ACC identifiability simulation complete.\n";
+    std::cout << "Identifiability simulation complete.\n";
     std::cout << "Config: " << config_path.string() << "\n";
     std::cout << "Output directory: " << config.output_dir.string() << "\n";
     std::cout << "Monte Carlo scenarios: " << adaptive::join_ints(config.monte_carlo_scenarios) << "\n";

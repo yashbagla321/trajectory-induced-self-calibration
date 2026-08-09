@@ -1,4 +1,4 @@
-"""Render the ACC 2027 paper's "conditioning summary" figure, a two-panel
+"""Render the paper's "conditioning summary" figure, a two-panel
 scatter plot (plus shared legend) validating that the paper's observability
 conditioning metrics track both each other and the downstream target
 localization error.

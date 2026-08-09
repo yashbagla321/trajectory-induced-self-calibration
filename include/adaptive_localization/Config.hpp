@@ -58,7 +58,7 @@ struct SimulationConfig {
     double information_exploration_gain = 0.35;
     double information_gradient_step = 0.08;
 
-    // Excitation-supervised mode (Algorithm 1 in the CDC closed-loop paper):
+    // Excitation-supervised mode (Algorithm 1 in the closed-loop paper):
     // the excitation epoch resets while the stored window's trajectory
     // spread S_v (computed from the known measurement poses) is below
     // supervised_spread_threshold, in place of the fixed decaying-swirl

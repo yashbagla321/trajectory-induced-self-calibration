@@ -2,15 +2,14 @@
 
 Code and data for the paper *"Trajectory-Induced Self-Calibration for
 Hidden-Target Localization Through an Unknown-Pose Range-Bearing Relay"*
-(submitted to the American Control Conference, ACC 2027; arXiv preprint
-forthcoming).
+(arXiv preprint forthcoming).
 
 This repository is a dependency-free C++17 simulation harness that proves
 and validates the paper's central claim: a vehicle can self-calibrate a
 range-bearing relay of unknown position and yaw from two distinct
 vehicle-relative observations, making a hidden target's relay-local packet
 globally actionable. The estimator core here is shared with the companion
-CDC paper's closed-loop controller
+closed-loop paper's controller
 ([excitation-supervised-closed-loop](https://github.com/yashbagla321/excitation-supervised-closed-loop)),
 which builds a supervised excitation-reset controller on top of the same
 identifiability result. This repository's `main.cpp` is trimmed to the
@@ -125,8 +124,8 @@ Python scripts depend only on Pillow; install with
   author = {Bagla, Yash},
   title  = {Trajectory-Induced Self-Calibration for Hidden-Target
             Localization Through an Unknown-Pose Range-Bearing Relay},
-  note   = {Submitted to the American Control Conference (ACC)},
-  year   = {2027}
+  note   = {arXiv preprint},
+  year   = {2026}
 }
 ```
 

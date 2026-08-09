@@ -1,5 +1,5 @@
-"""Render the paper's beacon-observation-geometry schematic (Fig. 1 in the
-ACC/L-CSS manuscript), which illustrates the unknown beacon frame and the
+"""Render the paper's beacon-observation-geometry schematic (Fig. 1
+in the manuscript), which illustrates the unknown beacon frame and the
 bearing/range measurement rays from two vehicle poses (q_a, q_b) and a
 target (p) to a common landmark (x, psi).
 
