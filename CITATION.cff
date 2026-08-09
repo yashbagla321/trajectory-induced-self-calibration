@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the associated paper."
+type: software
+title: "trajectory-induced-self-calibration"
+authors:
+  - family-names: Bagla
+    given-names: Yash
+repository-code: "https://github.com/yashbagla321/trajectory-induced-self-calibration"
+license: MIT
+version: 1.0.0
+date-released: "2026-08-09"
+preferred-citation:
+  type: unpublished
+  title: "Trajectory-Induced Self-Calibration for Hidden-Target Localization Through an Unknown-Pose Range-Bearing Relay"
+  authors:
+    - family-names: Bagla
+      given-names: Yash
+  year: 2027

@@ -129,3 +129,7 @@ Python scripts depend only on Pillow; install with
   year   = {2027}
 }
 ```
+
+## License
+
+MIT (see `LICENSE`).
