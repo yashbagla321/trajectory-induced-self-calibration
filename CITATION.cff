@@ -6,6 +6,7 @@ authors:
   - family-names: Bagla
     given-names: Yash
 repository-code: "https://github.com/yashbagla321/trajectory-induced-self-calibration"
+doi: 10.5281/zenodo.21864689
 license: MIT
 version: 1.0.0
 date-released: "2026-08-09"

@@ -2,7 +2,8 @@
 
 Code and data for the paper *"Trajectory-Induced Self-Calibration for
 Hidden-Target Localization Through an Unknown-Pose Range-Bearing Relay"*
-(arXiv preprint forthcoming).
+(arXiv preprint forthcoming). Each release is archived on Zenodo:
+[doi:10.5281/zenodo.21864689](https://doi.org/10.5281/zenodo.21864689).
 
 This repository is a dependency-free C++17 simulation harness that proves
 and validates the paper's central claim: a vehicle can self-calibrate a
