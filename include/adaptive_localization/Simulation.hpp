@@ -163,6 +163,26 @@ std::vector<ActiveExcitationComparisonRow> run_active_excitation_comparison(
 std::vector<SupervisedExcitationComparisonRow> run_supervised_excitation_comparison(
     const SimulationConfig& config);
 
+/// One named per-step closed-loop trace from run_closed_loop_showcase().
+struct ClosedLoopShowcaseRun {
+    std::string name;
+    ClosedLoopResult result;
+};
+
+/**
+ * Deterministic single-run traces behind the papers' policy-comparison
+ * figure: the understimulated (no-transient) scenario under the fixed
+ * decaying, information-gradient, and supervised excitation policies (same
+ * config and seed as run_supervised_excitation_comparison's understimulated
+ * pair, so those summary rows are the endpoints of these traces); the
+ * nominal scenario with the excitation term removed entirely (showing the
+ * convergence transit alone certifies); and supervised target-seeking runs
+ * from a ring of six start positions around the true target with distinct
+ * noise seeds.
+ */
+std::vector<ClosedLoopShowcaseRun> run_closed_loop_showcase(
+    const SimulationConfig& config);
+
 /**
  * @brief Sweeps the fixed schedule's decay rate lambda in the no-transient
  * scenario (vehicle initialized at the true target), comparing fixed vs

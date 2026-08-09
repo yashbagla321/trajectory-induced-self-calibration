@@ -1894,6 +1894,64 @@ std::vector<SupervisedExcitationComparisonRow> run_supervised_excitation_compari
     return rows;
 }
 
+// See Simulation.hpp. Every run is seeded independently, so adding or
+// reordering showcase runs cannot perturb any other experiment's RNG stream.
+std::vector<ClosedLoopShowcaseRun> run_closed_loop_showcase(
+    const SimulationConfig& config) {
+    std::vector<ClosedLoopShowcaseRun> runs;
+    const auto run_mode = [&runs](const std::string& name,
+                                  const SimulationConfig& scenario_config,
+                                  unsigned int seed,
+                                  ClosedLoopExcitationMode mode) {
+        std::mt19937 rng(seed);
+        runs.push_back({name, run_closed_loop_comparison(1, 1, scenario_config, rng, mode)});
+    };
+
+    // Understimulated (no-transient) trio: the exact scenario and seed of
+    // run_supervised_excitation_comparison's understimulated pair, plus the
+    // information-gradient schedule. Both unsupervised schedules share the
+    // same decaying envelope, so the trio isolates the reset rule (not the
+    // excitation shape) as the difference.
+    SimulationConfig stress = config;
+    stress.exploration_decay = 2.0;
+    stress.initial_target_estimate = {1.2, -0.75};
+    stress.initial_robot = stress.initial_target_estimate;
+    const unsigned int stress_seed = stress.closed_loop_seed + 300U;
+    run_mode("understimulated_fixed", stress, stress_seed,
+             ClosedLoopExcitationMode::Circular);
+    run_mode("understimulated_information", stress, stress_seed,
+             ClosedLoopExcitationMode::Information);
+    run_mode("understimulated_supervised", stress, stress_seed,
+             ClosedLoopExcitationMode::Supervised);
+
+    // Nominal scenario with the excitation term removed entirely: the
+    // convergence transit alone accumulates the certification spread, which
+    // is why the nominal trajectory figures look nearly straight.
+    SimulationConfig no_excitation = config;
+    no_excitation.exploration_amplitude = 0.0;
+    run_mode("nominal_no_excitation", no_excitation,
+             no_excitation.closed_loop_seed + 300U,
+             ClosedLoopExcitationMode::Supervised);
+
+    // Supervised target seeking from a ring of six start positions around
+    // the true target (fast decay, common wrong target prior, one distinct
+    // noise seed per start): the variety counterpart of the single seeking
+    // scenario, showing certification is not tied to one chosen start.
+    constexpr double kRingRadius = 1.8;
+    const Vec2 ring_center{1.2, -0.75};
+    for (int i = 0; i < 6; ++i) {
+        const double angle = static_cast<double>(i) * kPi / 3.0;
+        SimulationConfig seek = config;
+        seek.exploration_decay = 2.0;
+        seek.initial_robot = {ring_center.x + kRingRadius * std::cos(angle),
+                              ring_center.y + kRingRadius * std::sin(angle)};
+        run_mode("seeking_ring_" + std::to_string(i), seek,
+                 seek.closed_loop_seed + 400U + static_cast<unsigned int>(i),
+                 ClosedLoopExcitationMode::Supervised);
+    }
+    return runs;
+}
+
 namespace {
 
 /**
