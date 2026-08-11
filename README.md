@@ -92,11 +92,12 @@ Every error/RMSE/rank column is seed-deterministic given a fixed
 `std::mt19937` stream, but exact bit-for-bit reproduction of the committed
 CSVs additionally requires the same C++ standard library implementation
 used to generate them (this repo's checked-in results were built with
-MSVC's STL on Windows): `std::normal_distribution`'s sample sequence for a
-given engine state is implementation-defined, not specified by the C++
-standard, so `sample_noise()` (`include/adaptive_localization/Math.hpp`)
-can draw a different-but-statistically-equivalent sequence on, e.g., libstdc++
-or libc++. Rebuilding on a different standard library will reproduce the
+MinGW GCC's libstdc++ on Windows): `std::normal_distribution`'s sample
+sequence for a given engine state is implementation-defined, not specified
+by the C++ standard, so `sample_noise()`
+(`include/adaptive_localization/Math.hpp`) can draw a
+different-but-statistically-equivalent sequence on, e.g., MSVC's STL or
+libc++. Rebuilding on a different standard library will reproduce the
 same trends and conclusions but not necessarily identical values to the
 last decimal place.
 

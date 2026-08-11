@@ -1748,10 +1748,32 @@ ClosedLoopResult run_closed_loop_comparison(
                 config,
                 current_time);
         }
+        Vec2 seeking = (target_estimate - robot) * config.closed_loop_control_gain;
+        if (excitation_mode == ClosedLoopExcitationMode::Supervised && retriggered &&
+            config.exploration_amplitude > 0.0) {
+            // Directional seeking projection (Algorithm 1): while the stored
+            // window is underexcited, the seeking component opposing the
+            // current excitation half-period's push direction
+            // n = (-1)^floor(w t / pi) e_y is clipped at
+            // b = A e^{-lambda T_bar} / pi, so the half-period displacement
+            // inequality behind the finite-acquisition proposition holds by
+            // construction. The x and aligned-y components are untouched, and
+            // the nominal law is restored exactly once S_v >= S_bar. Skipped
+            // when A = 0: with no excitation there is no half-period
+            // structure (and no acquisition guarantee) to protect.
+            const double allowance = config.exploration_amplitude *
+                std::exp(-config.exploration_decay * config.closed_loop_dt) / kPi;
+            const long long half_period = static_cast<long long>(
+                std::floor(config.exploration_frequency * phase_reference / kPi));
+            if (half_period % 2 == 0) {
+                seeking.y = std::max(seeking.y, -allowance);
+            } else {
+                seeking.y = std::min(seeking.y, allowance);
+            }
+        }
         // Target-seeking control plus excitation, integrated with a fixed
         // Euler step (closed_loop_dt).
-        robot = robot + ((target_estimate - robot) * config.closed_loop_control_gain + excitation) *
-            config.closed_loop_dt;
+        robot = robot + (seeking + excitation) * config.closed_loop_dt;
 
         ClosedLoopPoint point;
         point.step = step;
