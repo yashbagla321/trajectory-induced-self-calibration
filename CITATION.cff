@@ -6,10 +6,10 @@ authors:
   - family-names: Bagla
     given-names: Yash
 repository-code: "https://github.com/yashbagla321/trajectory-induced-self-calibration"
-doi: 10.5281/zenodo.21864689
+doi: 10.5281/zenodo.21872277
 license: MIT
-version: 1.0.0
-date-released: "2026-08-09"
+version: 1.1.0
+date-released: "2026-08-10"
 preferred-citation:
   type: unpublished
   title: "Trajectory-Induced Self-Calibration for Hidden-Target Localization Through an Unknown-Pose Range-Bearing Relay"
@@ -17,3 +17,4 @@ preferred-citation:
     - family-names: Bagla
       given-names: Yash
   year: 2026
+  url: "https://arxiv.org/abs/2608.09464"

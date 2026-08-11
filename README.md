@@ -2,7 +2,7 @@
 
 Code and data for the paper *"Trajectory-Induced Self-Calibration for
 Hidden-Target Localization Through an Unknown-Pose Range-Bearing Relay"*
-(arXiv preprint forthcoming). Each release is archived on Zenodo:
+([arXiv:2608.09464](https://arxiv.org/abs/2608.09464)). Each release is archived on Zenodo:
 [doi:10.5281/zenodo.21864689](https://doi.org/10.5281/zenodo.21864689).
 
 This repository is a dependency-free C++17 simulation harness that proves
@@ -125,7 +125,7 @@ Python scripts depend only on Pillow; install with
   author = {Bagla, Yash},
   title  = {Trajectory-Induced Self-Calibration for Hidden-Target
             Localization Through an Unknown-Pose Range-Bearing Relay},
-  note   = {arXiv preprint},
+  note   = {arXiv:2608.09464},
   year   = {2026}
 }
 ```
