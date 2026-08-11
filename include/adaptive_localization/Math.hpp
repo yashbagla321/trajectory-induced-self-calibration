@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <vector>
@@ -109,6 +110,33 @@ inline double sample_noise(double sigma, std::mt19937& rng) {
     }
     std::normal_distribution<double> distribution(0.0, sigma);
     return distribution(rng);
+}
+
+// Directional seeking projection of Algorithm 1 (closed-loop paper): while
+// the stored window is underexcited, the seeking-velocity component opposing
+// the current excitation half-period's push direction
+// n(t) = (-1)^floor(omega t / pi) e_y is clipped at the allowance
+// b = A e^{-lambda T_bar} / pi, so the finite-acquisition proposition's
+// hypothesis (ii) holds for the implemented controller by construction; the
+// x component and any seeking aligned with n(t) pass through untouched.
+// Callers gate on supervised mode, an underexcited (retriggered) window, and
+// amplitude > 0 -- with no excitation there is no half-period structure to
+// protect. Both the batch simulator and the ROS 2 / Gazebo node share this
+// implementation.
+inline Vec2 project_seeking_velocity(const Vec2& seeking, double amplitude,
+                                     double decay, double sample_period,
+                                     double frequency, double time) {
+    const double allowance =
+        amplitude * std::exp(-decay * sample_period) / kPi;
+    const long long half_period =
+        static_cast<long long>(std::floor(frequency * time / kPi));
+    Vec2 projected = seeking;
+    if (half_period % 2 == 0) {
+        projected.y = std::max(projected.y, -allowance);
+    } else {
+        projected.y = std::min(projected.y, allowance);
+    }
+    return projected;
 }
 
 /**
