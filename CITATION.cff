@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite the associated paper."
+message: "If you use this software, or build on the associated paper's results or concepts, please cite the paper (preferred-citation below)."
 type: software
 title: "trajectory-induced-self-calibration"
 authors:
@@ -17,4 +17,8 @@ preferred-citation:
     - family-names: Bagla
       given-names: Yash
   year: 2026
+  doi: 10.48550/arXiv.2608.09464
   url: "https://arxiv.org/abs/2608.09464"
+  identifiers:
+    - type: other
+      value: "arXiv:2608.09464"

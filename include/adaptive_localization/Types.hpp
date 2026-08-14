@@ -228,7 +228,7 @@ struct SupervisedLambdaSweepRow {
 /// nontrivial target-seeking comparison: the vehicle starts AT the wrong
 /// initial target estimate, so the seeking term of the controller is
 /// initially quiescent and only the excitation policy can generate the
-/// spread needed to calibrate -- making target-seeking success genuinely
+/// spread needed to calibrate -- making target-seeking success
 /// contingent on excitation, unlike the calibration-isolation decay sweep.
 /// Aggregated over a paired Monte Carlo batch; error columns are
 /// across-trial RMSEs with percentile-bootstrap 95% confidence intervals,

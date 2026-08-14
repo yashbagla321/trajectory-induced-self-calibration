@@ -1346,7 +1346,7 @@ TrialResult run_multistart_local_batch_trial(
     for (int start_index = 0; start_index < starts; ++start_index) {
         // Distribute additional starts evenly around a circle: perturb the
         // target seed tangentially and vary the beacon radius/yaw guess so
-        // each start probes a genuinely different basin of attraction.
+        // each start probes a different basin of attraction.
         const double angle = 2.0 * kPi * static_cast<double>(start_index) / static_cast<double>(starts);
         const Vec2 shifted_target{
             start_index == 0 ? target_seed.x : target_seed.x + 0.4 * beacon_seed_radius * std::cos(angle),
@@ -2252,7 +2252,7 @@ std::vector<SupervisedSeekingComparisonRow> run_supervised_seeking_comparison(
     // policy can generate the trajectory spread needed to calibrate the
     // relay, and without calibration the target estimate -- and hence the
     // vehicle -- never moves to the true target. Target-seeking success is
-    // therefore genuinely contingent on the excitation policy here, unlike
+    // therefore contingent on the excitation policy here, unlike
     // the decay sweep's calibration-isolation scenario where the vehicle
     // already sits at the target. The fast decay makes the fixed schedule's
     // excitation budget inadequate unless it happens to suffice by luck.

@@ -123,15 +123,25 @@ Python scripts depend only on Pillow; install with
 
 ## Citation
 
+If you use this code, or build on the paper's results or concepts, please
+cite the paper:
+
 ```bibtex
-@unpublished{bagla2027identifiability,
-  author = {Bagla, Yash},
-  title  = {Trajectory-Induced Self-Calibration for Hidden-Target
-            Localization Through an Unknown-Pose Range-Bearing Relay},
-  note   = {arXiv:2608.09464},
-  year   = {2026}
+@misc{bagla2027identifiability,
+  author        = {Bagla, Yash},
+  title         = {Trajectory-Induced Self-Calibration for Hidden-Target
+                   Localization Through an Unknown-Pose Range-Bearing Relay},
+  year          = {2026},
+  eprint        = {2608.09464},
+  archivePrefix = {arXiv},
+  primaryClass  = {eess.SY},
+  doi           = {10.48550/arXiv.2608.09464},
+  url           = {https://arxiv.org/abs/2608.09464}
 }
 ```
+
+To cite this software artifact specifically, use the version DOI from the
+Zenodo archive (see `CITATION.cff`).
 
 ## License
 
